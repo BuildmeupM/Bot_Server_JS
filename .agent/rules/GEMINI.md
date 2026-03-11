@@ -95,6 +95,16 @@ When auto-applying an agent, inform the user:
 
 ## TIER 0: UNIVERSAL RULES (Always Active)
 
+### 💻 Terminal Execution Rules (Windows)
+
+> 🔴 **MANDATORY:** These rules apply to ALL shell/terminal executions. No exceptions.
+
+1. **Always use `cmd /c`** for all shell executions to ensure the process terminates correctly and sends an EOF signal.
+   - ✅ `cmd /c pip list` | ❌ `pip list`
+   - ✅ `cmd /c npm install` | ❌ `npm install`
+2. **Avoid interactive shells.** If a persistent session is needed, use `cmd /k` but ensure the command is self-terminating.
+3. **ENV:** Windows — all commands must be Windows-compatible.
+
 ### 🌐 Language Handling
 
 When user's prompt is NOT in English:

@@ -76,6 +76,7 @@ function createJob(profileId, profile, excelPath) {
     username: profile.username,
     software: profile.software,
     peakCode: profile.peak_code,
+    vatStatus: profile.vat_status || 'registered',
     excelPath,
     status: "queued", // queued | running | logged_in | working | done | error | stopped
     logs: [],
@@ -184,9 +185,52 @@ async function parseExcelData(excelPath, jobId) {
           );
         }
 
+        // --- Validation: ตรวจสอบคอลัมน์ที่จำเป็น ---
+        const requiredColumns = [
+          'ลำดับ',
+          'ชื่อบริษัท - ผู้ขาย',
+          'เลขประจำตัวผู้เสียภาษี',
+          'วันที่',
+          'โค้ดบันทึกบัญชี',
+          'ยอดก่อนภาษีมูลค่าเพิ่ม',
+          'ยอดหลังบวกภาษีมูลค่าเพิ่ม',
+          'ชื่อไฟล์ใหม่',
+          'ชื่อไฟล์เก่า'
+        ];
+
+        // ฟังก์ชันหาค่าแบบยืดหยุ่น (รองรับชื่อคอลัมน์ที่มี whitespace ต่างกัน)
+        const flexFind = (row, keyword) => {
+          const cleanKw = keyword.replace(/[\n\r\s]/g, '');
+          const key = Object.keys(row).find(k => k.replace(/[\n\r\s]/g, '').includes(cleanKw));
+          return key ? row[key] : undefined;
+        };
+
+        let skippedCount = 0;
+        const validTransactions = allTransactions.filter((tx, idx) => {
+          const missingCols = [];
+          for (const col of requiredColumns) {
+            const val = flexFind(tx, col);
+            if (val === undefined || val === null || String(val).trim() === '') {
+              missingCols.push(col);
+            }
+          }
+          if (missingCols.length > 0) {
+            const rowNum = flexFind(tx, 'ลำดับ') || (idx + 1);
+            addLog(jobId, "warn", `⚠️ ข้ามรายการที่ ${rowNum} — ข้อมูลไม่ครบ: ${missingCols.join(', ')}`);
+            skippedCount++;
+            return false;
+          }
+          return true;
+        });
+
+        if (skippedCount > 0) {
+          addLog(jobId, "warn", `⚠️ ข้ามรายการทั้งหมด ${skippedCount} รายการ (ข้อมูลไม่ครบ) เหลือ ${validTransactions.length} รายการที่พร้อมทำงาน`);
+        }
+
         resolve({
-          transactions: allTransactions,
+          transactions: validTransactions,
           vendors: vendors,
+          skippedCount: skippedCount,
         });
       } catch (innerE) {
         reject(innerE);
@@ -239,6 +283,22 @@ async function executeJob(job) {
     try {
       const excelData = await parseExcelData(job.excelPath, job.id);
       job.excelData = excelData;
+      
+      // ถ้ามีรายการถูกข้าม (ข้อมูลไม่ครบ) → หยุดทันที ไม่เข้า Login
+      if (excelData.skippedCount > 0) {
+        addLog(job.id, "error", `❌ พบ ${excelData.skippedCount} รายการที่ข้อมูลไม่ครบ — กรุณาแก้ไข Excel แล้วลองใหม่ (ระบบหยุดก่อน Login)`);
+        job.status = "error";
+        job.finishedAt = new Date().toISOString();
+        return;
+      }
+      
+      if (excelData.transactions.length === 0) {
+        addLog(job.id, "error", `❌ ไม่พบรายการที่พร้อมทำงาน — กรุณาตรวจสอบ Excel`);
+        job.status = "error";
+        job.finishedAt = new Date().toISOString();
+        return;
+      }
+      
       addLog(
         job.id,
         "success",
@@ -494,10 +554,10 @@ async function executeJob(job) {
 
           addLog(job.id, "info", "⏳ รอดึงข้อมูลรายชื่อผู้ขาย (ให้เวลา API)...");
           try {
-              // รอให้ตัวเลือก (li / span) โผล่ขึ้นมาแทนที่จะ Fix เวลา 2.5 วิ
-              await vendorMultiselect.locator('.multiselect__element').first().waitFor({ state: 'visible', timeout: 2500 });
+              // รอให้ตัวเลือก (li / span) โผล่ขึ้นมา — เพิ่มเวลาเป็น 5 วิ เพื่อให้ API โหลดรายการครบ
+              await vendorMultiselect.locator('.multiselect__element').first().waitFor({ state: 'visible', timeout: 5000 });
           } catch(e) {}
-          await page.waitForTimeout(300); // ชะลอให้ React/Vue อัปเดต list สมบูรณ์
+          await page.waitForTimeout(1500); // ชะลอ 1.5 วิ ให้ Vue อัปเดต list สมบูรณ์ก่อนวิเคราะห์
 
           // --- วิเคราะห์ผลลัพธ์ใน Dropdown (เฉพาะ Dropdown ผู้ขาย) ---
           const allOptions = vendorMultiselect.locator(
@@ -574,17 +634,30 @@ async function executeJob(job) {
             let matchedOpt = null;
             
             for (const opt of vendorOptions) {
-                if (opt.text.trim() === "ทั้งหมด") continue;
+                // ข้ามหัวข้อแบ่งกลุ่มที่ไม่ใช่ข้อมูลผู้ขาย
+                const trimmed = opt.text.trim();
+                if (trimmed === "ทั้งหมด" || trimmed === "รายการที่ใช้บ่อย") continue;
                 
-                // สกัดข้อมูลสาขาจากข้อความของ PEAK
-                const isOptHQ = opt.text.includes('สำนักงานใหญ่') || opt.text.includes('(00000)') || opt.text.includes('สาขา 00000');
+                // ดึงเลขสาขา 5 หลักจากข้อความ (เช่น "(00069)" → "00069")
+                const branchMatch = opt.text.match(/\((\d{5})\)/);
+                const optBranchNum = branchMatch ? branchMatch[1] : null;
+                
+                // ตรวจสอบว่ารายการนี้เป็นสำนักงานใหญ่หรือไม่
+                const isOptHQ = opt.text.includes('สำนักงานใหญ่') 
+                    || optBranchNum === '00000'
+                    || (!optBranchNum && !opt.text.includes('สาขา')); // ไม่มีเลขสาขาเลย = ถือว่า HQ (แต่ต้องไม่ใช่หัวข้อกลุ่ม)
+                
+                // ถ้ามีเลขสาขาย่อย (ไม่ใช่ 00000) = ไม่ใช่ HQ แน่นอน
+                const isOptBranch = optBranchNum && optBranchNum !== '00000';
                 
                 let isMatch = false;
                 if (isTargetHQ) {
-                    if (isOptHQ || (!opt.text.includes('สาขา') && !opt.text.match(/\(\d{5}\)/))) {
+                    // เป้าหมายคือสำนักงานใหญ่ → ต้องเจอ option ที่เป็น HQ ชัดเจน และต้องไม่มีเลขสาขาย่อย
+                    if (isOptHQ && !isOptBranch) {
                         isMatch = true;
                     }
                 } else {
+                    // เป้าหมายคือสาขาย่อย → ต้องเจอเลข branchNumTarget ตรงกัน
                     if (!isOptHQ && (opt.text.includes(branchNumTarget) || opt.text.includes(branch))) {
                         isMatch = true;
                     }
@@ -603,21 +676,78 @@ async function executeJob(job) {
                 await targetOptElement.click();
                 await page.waitForTimeout(2000);
             } else {
-                addLog(job.id, "warn", `⚠️ ไม่พบสาขาที่ตรงกับ "${branch}" ในระบบ -> ต้องเพิ่มผู้ติดต่อใหม่`);
+                addLog(job.id, "warn", `⚠️ ไม่พบสาขาที่ตรงกับ "${branch || 'สำนักงานใหญ่'}" ในระบบ -> ต้องเพิ่มผู้ติดต่อใหม่`);
                 
-                // ถ้ายกดไม่เจอสาขาที่ตรง ให้คลิก "เพิ่มผู้ติดต่อ"
-                const addContactOption = vendorMultiselect
-                  .locator(".multiselect__option")
-                  .filter({ hasText: "เพิ่มผู้ติดต่อ" })
-                  .first();
-                  
-                if (await addContactOption.isVisible({ timeout: 3000 })) {
-                  await addContactOption.click();
-                  addLog(job.id, "info", "🖱️ คลิก + เพิ่มผู้ติดต่อ สำเร็จ");
-                } else {
-                  const addContactBtn = page.getByText("+ เพิ่มผู้ติดต่อ", { exact: false }).first();
-                  await addContactBtn.click({ force: true });
+                // คลิก "เพิ่มผู้ติดต่อ" — ลองหลายวิธีเพราะ PEAK เปลี่ยน DOM บ่อย
+                let addClicked = false;
+                
+                // วิธี 1: หาจาก .multiselect__option ภายใน vendorMultiselect
+                try {
+                    const addOpt1 = vendorMultiselect
+                      .locator(".multiselect__option")
+                      .filter({ hasText: "เพิ่มผู้ติดต่อ" })
+                      .first();
+                    if (await addOpt1.isVisible({ timeout: 2000 })) {
+                        await addOpt1.click({ force: true });
+                        addClicked = true;
+                        addLog(job.id, "info", "🖱️ คลิก + เพิ่มผู้ติดต่อ สำเร็จ (วิธี 1: multiselect__option)");
+                    }
+                } catch (e) {}
+                
+                // วิธี 2: หาจาก .multiselect__element ที่มีข้อความ เพิ่มผู้ติดต่อ
+                if (!addClicked) {
+                    try {
+                        const addOpt2 = vendorMultiselect
+                          .locator(".multiselect__element")
+                          .filter({ hasText: "เพิ่มผู้ติดต่อ" })
+                          .first();
+                        if (await addOpt2.isVisible({ timeout: 2000 })) {
+                            await addOpt2.click({ force: true });
+                            addClicked = true;
+                            addLog(job.id, "info", "🖱️ คลิก + เพิ่มผู้ติดต่อ สำเร็จ (วิธี 2: multiselect__element)");
+                        }
+                    } catch (e) {}
                 }
+                
+                // วิธี 3: หาจาก page ทั้งหน้าด้วย text
+                if (!addClicked) {
+                    try {
+                        const addOpt3 = page.getByText("เพิ่มผู้ติดต่อ", { exact: false }).first();
+                        if (await addOpt3.isVisible({ timeout: 2000 })) {
+                            await addOpt3.click({ force: true });
+                            addClicked = true;
+                            addLog(job.id, "info", "🖱️ คลิก + เพิ่มผู้ติดต่อ สำเร็จ (วิธี 3: getByText)");
+                        }
+                    } catch (e) {}
+                }
+                
+                // วิธี 4: ใช้ evaluate + dispatchEvent เพื่อ trigger Vue event handler
+                if (!addClicked) {
+                    try {
+                        const clicked = await page.evaluate(() => {
+                            // หา element ที่มีข้อความ "เพิ่มผู้ติดต่อ" และมองเห็นอยู่
+                            const allEls = Array.from(document.querySelectorAll('span, div, li, p, a, button'));
+                            const addEl = allEls.find(el => {
+                                const text = el.textContent.trim();
+                                return (text.includes('เพิ่มผู้ติดต่อ') || text.includes('+ เพิ่มผู้ติดต่อ')) && el.offsetWidth > 0;
+                            });
+                            if (addEl) {
+                                // ใช้ MouseEvent แทน native click เพื่อให้ Vue จับ event ได้
+                                addEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                return true;
+                            }
+                            return false;
+                        });
+                        if (clicked) {
+                            addClicked = true;
+                            addLog(job.id, "info", "🖱️ คลิก + เพิ่มผู้ติดต่อ สำเร็จ (วิธี 4: JS dispatchEvent)");
+                        }
+                    } catch (e) {
+                        addLog(job.id, "error", `❌ ไม่สามารถคลิกปุ่ม 'เพิ่มผู้ติดต่อ' ได้ทุกวิธี: ${e.message}`);
+                    }
+                }
+                
+                await page.waitForTimeout(1000);
                 
                 // หักล้าง array เพื่อให้ block ถัดไปทำงานเหมือนเป็นของใหม่
                 vendorOptions.length = 0;
@@ -626,14 +756,30 @@ async function executeJob(job) {
 
           // ถ้าเข้า "เพิ่มผู้ติดต่อ" → กรอกข้อมูลใน Modal
           if (vendorOptions.length === 0) {
-            // 1. รอ Modal โหลดเสร็จ
+            // 1. รอ Modal โหลดเสร็จ — ใช้ input.inputId (ช่องกรอกเลขภาษี 13 หลัก) เป็นตัวเช็ค
+            // เพราะ element นี้มีเฉพาะใน Modal เท่านั้น ไม่มีในหน้าหลัก
             addLog(job.id, "info", "⏳ รอ Modal เพิ่มผู้ติดต่อโหลด...");
-            // ไม่ใช้ class .modal-content แล้ว เพราะโครงสร้าง PEAK อาจเปลี่ยน ให้รอแค่ Text Header ปรากฏ
-            await page
-              .getByText("เพิ่มผู้ติดต่อ", { exact: true })
-              .first()
-              .waitFor({ state: "visible", timeout: 15000 });
+            try {
+                await page.locator('input.inputId').first().waitFor({ state: 'visible', timeout: 15000 });
+            } catch (modalWaitErr) {
+                addLog(job.id, "warn", `⚠️ Modal ไม่ปรากฏภายใน 15 วิ — ลองคลิก 'เพิ่มผู้ติดต่อ' อีกครั้ง...`);
+                // ปิด Dropdown ก่อนแล้วลองคลิกใหม่
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(500);
+                // คลิกช่อง vendor ใหม่
+                await vendorDropdown.click({ force: true });
+                await page.waitForTimeout(1000);
+                // หาปุ่มเพิ่มผู้ติดต่อใน Dropdown ที่กางใหม่
+                const retryAddBtn = page.locator('.multiselect__option').filter({ hasText: 'เพิ่มผู้ติดต่อ' }).first();
+                if (await retryAddBtn.isVisible({ timeout: 3000 })) {
+                    await retryAddBtn.click();
+                    addLog(job.id, "info", "🖱️ คลิก + เพิ่มผู้ติดต่อ สำเร็จ (Retry)");
+                }
+                // รออีกรอบ
+                await page.locator('input.inputId').first().waitFor({ state: 'visible', timeout: 15000 });
+            }
             await page.waitForTimeout(1000); // ให้ Vue render เต็มที่
+            addLog(job.id, "success", "✅ Modal เพิ่มผู้ติดต่อปรากฏแล้ว");
 
             // ใช้ page เป็น base แทน modalContent เพื่อหลีกเลี่ยงการจับ Scope ผิด
             const modalContent = page;
@@ -1060,6 +1206,7 @@ async function executeJob(job) {
           // 1. วันที่ (ทำครั้งเดียวต่อบิล)
           const issueDate = primaryTx["วันที่"];
           if (issueDate) {
+              addLog(job.id, "info", `📅 กำลังกรอกวันที่ออก (ค่าจาก Excel: ${issueDate})...`);
               // หาช่องวันที่ออก จาก name attribute ที่บอทหรอก
               const issueDateEl = page.locator('input[name="วันที่ออก"]').first();
               try {
@@ -1075,10 +1222,12 @@ async function executeJob(job) {
                       const mon = String(d.getMonth() + 1).padStart(2, '0');
                       const yr = String(d.getFullYear());
                       dateStr = `${day}/${mon}/${yr}`;
+                      addLog(job.id, "info", `🔄 แปลงวันที่จาก Excel serial (${issueDate}) → ${dateStr}`);
                   } else if (dateStr.includes('-')) {
                       // สมมติมาแปลกเป็น YYYY-MM-DD ให้สลับกลับ
                       const parts = dateStr.split('-');
                       if (parts.length === 3) dateStr = `${parts[2]}/${parts[1]}/${parts[0]}`;
+                      addLog(job.id, "info", `🔄 แปลงวันที่จาก YYYY-MM-DD → ${dateStr}`);
                   }
                   
                   await issueDateEl.click();
@@ -1087,22 +1236,63 @@ async function executeJob(job) {
                   await issueDateEl.press('Backspace');
                   await issueDateEl.pressSequentially(dateStr, { delay: 10 });
                   await issueDateEl.press('Enter');
+                  addLog(job.id, "success", `✅ กรอกวันที่ออก: ${dateStr} สำเร็จ`);
               } else {
                   addLog(job.id, "warn", `⚠️ หาช่อง 'วันที่ออก' ไม่พบ ให้ใช้งานวันที่ตั้งต้นของระบบ`);
+              }
+          } else {
+              addLog(job.id, "info", `📅 ไม่มีข้อมูลวันที่ใน Excel ใช้วันที่ตั้งต้นของระบบ`);
+          }
+          // 1.5 วันที่ครบกำหนด (Due Date) — กรอกเฉพาะเมื่อ Excel มีข้อมูล
+          const dueDate = primaryTx["วันครบกำหนดชำระ"];
+          if (dueDate) {
+              addLog(job.id, "info", `📅 กำลังกรอกวันที่ครบกำหนด (ค่าจาก Excel: ${dueDate})...`);
+              const dueDateEl = page.locator('input[name="วันที่ครบกำหนด"]').first();
+              try {
+                  await dueDateEl.waitFor({ state: 'attached', timeout: 5000 });
+              } catch(e) {}
+              
+              if (await dueDateEl.isVisible() || await dueDateEl.count() > 0) {
+                  let dueDateStr = String(dueDate).trim();
+                  // แปลง format เดียวกับวันที่ออก
+                  if (!isNaN(dueDateStr) && Number(dueDateStr) >= 20000) {
+                      const d = new Date(Math.round((Number(dueDateStr) - 25569) * 86400 * 1000));
+                      const day = String(d.getDate()).padStart(2, '0');
+                      const mon = String(d.getMonth() + 1).padStart(2, '0');
+                      const yr = String(d.getFullYear());
+                      dueDateStr = `${day}/${mon}/${yr}`;
+                      addLog(job.id, "info", `🔄 แปลงวันครบกำหนดจาก Excel serial (${dueDate}) → ${dueDateStr}`);
+                  } else if (dueDateStr.includes('-')) {
+                      const parts = dueDateStr.split('-');
+                      if (parts.length === 3) dueDateStr = `${parts[2]}/${parts[1]}/${parts[0]}`;
+                      addLog(job.id, "info", `🔄 แปลงวันครบกำหนดจาก YYYY-MM-DD → ${dueDateStr}`);
+                  }
+                  
+                  await dueDateEl.click();
+                  await dueDateEl.press('Control+a');
+                  await dueDateEl.press('Backspace');
+                  await dueDateEl.pressSequentially(dueDateStr, { delay: 10 });
+                  await dueDateEl.press('Enter');
+                  addLog(job.id, "success", `✅ กรอกวันที่ครบกำหนด: ${dueDateStr} สำเร็จ`);
+              } else {
+                  addLog(job.id, "warn", `⚠️ หาช่อง 'วันที่ครบกำหนด' ไม่พบบนหน้าเว็บ`);
               }
           }
           
           // 2. เลขที่เอกสาร (Tax Invoice No / Document No) (ทำครั้งเดียวต่อบิล)
           const docNo = primaryTx["เลขที่เอกสาร"];
           if (docNo) {
-              addLog(job.id, "info", `📝 กรอกเลขที่ใบกำกับภาษี: ${docNo}`);
+              addLog(job.id, "info", `📝 กำลังกรอกเลขที่ใบกำกับภาษี: ${docNo}...`);
               const taxInvInput = page.getByPlaceholder("ระบุเลขที่ใบกำกับภาษี").first();
               if (await taxInvInput.isVisible()) {
                   await taxInvInput.fill("");
                   await taxInvInput.pressSequentially(String(docNo), { delay: 10 });
+                  addLog(job.id, "success", `✅ กรอกเลขที่ใบกำกับภาษี: ${docNo} สำเร็จ`);
               } else {
                   addLog(job.id, "warn", `⚠️ หาช่อง 'เลขที่ใบกำกับภาษี' ไม่พบ`);
               }
+          } else {
+              addLog(job.id, "info", `📝 ไม่มีข้อมูลเลขที่เอกสารใน Excel (ข้ามขั้นตอน)`);
           }
           
           // --- วนลูปกรอกรายการสินค้า/บัญชี ภายในบิลนี้ ---
@@ -1407,6 +1597,74 @@ async function executeJob(job) {
               }
           } // End of items loop
 
+          // --- 6.5 กรอกเอกสารอ้างอิง (ถ้ามีใน Excel) ---
+          const getExcelValFlex = (tx, keyword) => {
+              const keys = Object.keys(tx);
+              const matchedKey = keys.find(k => k.replace(/[\n\r\s]/g, '').includes(keyword));
+              return matchedKey ? tx[matchedKey] : undefined;
+          };
+          
+          const refValue = getExcelValFlex(primaryTx, "อ้างอิง");
+          if (refValue && String(refValue).trim() !== "") {
+              const refStr = String(refValue).trim();
+              addLog(job.id, "info", `📎 กำลังกรอกเอกสารอ้างอิง: ${refStr}...`);
+              try {
+                  const refInput = page.getByPlaceholder("ระบุเอกสารอ้างอิง ถ้ามี").first();
+                  if (await refInput.isVisible({ timeout: 3000 })) {
+                      await refInput.scrollIntoViewIfNeeded();
+                      await refInput.click({ force: true });
+                      await refInput.fill("");
+                      await refInput.pressSequentially(refStr, { delay: 10 });
+                      await page.waitForTimeout(200);
+                      addLog(job.id, "success", `✅ กรอกเอกสารอ้างอิง: ${refStr} สำเร็จ`);
+                  } else {
+                      addLog(job.id, "warn", `⚠️ หาช่อง 'อ้างอิง' ไม่พบบนหน้าเว็บ`);
+                  }
+              } catch (refErr) {
+                  addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะกรอกอ้างอิง: ${refErr.message}`);
+              }
+          }
+
+          // --- 6.6 กรอกหมายเหตุสำหรับผู้ขาย (ถ้ามีใน Excel) ---
+          const noteValue = getExcelValFlex(primaryTx, "หมายเหตุ");
+          if (noteValue && String(noteValue).trim() !== "") {
+              const noteStr = String(noteValue).trim();
+              addLog(job.id, "info", `📝 กำลังกรอกหมายเหตุสำหรับผู้ขาย: ${noteStr.substring(0, 50)}${noteStr.length > 50 ? '...' : ''}...`);
+              try {
+                  // คลิก "ย่อ/ขยาย" เพื่อเปิดส่วนหมายเหตุ (ถ้ายังย่ออยู่)
+                  const noteSection = page.locator('#RecordExternal').first();
+                  if (await noteSection.count() > 0) {
+                      await noteSection.scrollIntoViewIfNeeded();
+                      
+                      // เช็คว่า textarea มองเห็นไหม ถ้าไม่เห็น ต้องกดกาง
+                      const noteTextarea = page.locator('textarea#หมายเหตุสำหรับผู้ขาย, textarea[id="หมายเหตุสำหรับผู้ขาย"]').first();
+                      let isTextareaVisible = await noteTextarea.isVisible({ timeout: 1000 }).catch(() => false);
+                      
+                      if (!isTextareaVisible) {
+                          // กดปุ่ม "ย่อ/ขยาย" ภายใน section หมายเหตุ
+                          const expandBtn = noteSection.locator('p.textBlue', { hasText: 'ย่อ/ขยาย' }).first();
+                          if (await expandBtn.isVisible({ timeout: 2000 })) {
+                              await expandBtn.click({ force: true });
+                              await page.waitForTimeout(500); // รอ animation กาง
+                              addLog(job.id, "info", `🔽 กดกางส่วน 'หมายเหตุสำหรับผู้ขาย' แล้ว`);
+                          }
+                      }
+                      
+                      // กรอกข้อมูลลง textarea
+                      await noteTextarea.waitFor({ state: 'visible', timeout: 3000 });
+                      await noteTextarea.click({ force: true });
+                      await noteTextarea.fill("");
+                      await noteTextarea.fill(noteStr);
+                      await page.waitForTimeout(200);
+                      addLog(job.id, "success", `✅ กรอกหมายเหตุสำหรับผู้ขายสำเร็จ`);
+                  } else {
+                      addLog(job.id, "warn", `⚠️ หาส่วน 'หมายเหตุสำหรับผู้ขาย' (#RecordExternal) ไม่พบบนหน้าเว็บ`);
+                  }
+              } catch (noteErr) {
+                  addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะกรอกหมายเหตุ: ${noteErr.message}`);
+              }
+          }
+
           // --- 7. เลือกรูปแบบการชำระเงิน "ขั้นสูง" ---
           addLog(job.id, "info", `⚙️ กำลังเลือกรูปแบบชำระเงิน 'ขั้นสูง'...`);
           try {
@@ -1657,17 +1915,50 @@ async function executeJob(job) {
                       addLog(job.id, "info", `🔄 กำลังเข้าสู่โหมดแก้ไขเอกสาร...`);
                       
                       try {
-                          // คลิกปุ่ม "ตัวเลือก"
-                          const optionsBtn = page.locator('div.buttonNotDefaultOption p', { hasText: 'ตัวเลือก' }).first();
-                          await optionsBtn.waitFor({ state: 'visible', timeout: 3000 });
-                          await optionsBtn.scrollIntoViewIfNeeded();
-                          await optionsBtn.click({ force: true });
-                          await page.waitForTimeout(500); // รอเมนูกาง
+                          // คลิกปุ่ม "ตัวเลือก" (หลาย selector fallback)
+                          let optionsClicked = false;
+                          const optSelectors = [
+                              page.locator('div.buttonNotDefaultOption p', { hasText: 'ตัวเลือก' }).first(),
+                              page.getByText('ตัวเลือก', { exact: true }).first(),
+                              page.locator('button, div', { hasText: 'ตัวเลือก' }).last()
+                          ];
+                          for (const optBtn of optSelectors) {
+                              try {
+                                  if (await optBtn.isVisible({ timeout: 2000 })) {
+                                      await optBtn.scrollIntoViewIfNeeded();
+                                      await optBtn.click({ force: true });
+                                      optionsClicked = true;
+                                      break;
+                                  }
+                              } catch (e) {}
+                          }
+                          await page.waitForTimeout(1000); // รอเมนูกาง (เพิ่มเป็น 1 วิ)
                           
-                          // คลิกคำว่า "แก้ไข"
-                          const editOption = page.locator('div.optionBox div.option', { hasText: 'แก้ไข' }).first();
-                          await editOption.waitFor({ state: 'visible', timeout: 2000 });
-                          await editOption.click({ force: true });
+                          // คลิกคำว่า "แก้ไข" (หลาย selector fallback)
+                          let editClicked = false;
+                          const editSelectors = [
+                              page.locator('div.optionBox div.option', { hasText: 'แก้ไข' }).first(),
+                              page.locator('.option', { hasText: 'แก้ไข' }).first(),
+                              page.getByText('แก้ไข', { exact: true }).first()
+                          ];
+                          for (const editOpt of editSelectors) {
+                              try {
+                                  if (await editOpt.isVisible({ timeout: 3000 })) {
+                                      await editOpt.click({ force: true });
+                                      editClicked = true;
+                                      break;
+                                  }
+                              } catch (e) {}
+                          }
+                          // Fallback: JS evaluate
+                          if (!editClicked) {
+                              await page.evaluate(() => {
+                                  const els = Array.from(document.querySelectorAll('div, span, p, a'));
+                                  const editEl = els.find(el => el.textContent.trim() === 'แก้ไข' && el.offsetWidth > 0);
+                                  if (editEl) editEl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                              });
+                              addLog(job.id, "info", "🖱️ คลิก 'แก้ไข' ผ่าน JS fallback");
+                          }
                           
                           addLog(job.id, "success", `✅ เข้าสู่หน้าแก้ไขเรียบร้อยแล้ว รอดำเนินการปรับปรุงภาษี...`);
                           
@@ -1728,6 +2019,171 @@ async function executeJob(job) {
                       addLog(job.id, "success", `✅ ยอดภาษีมูลค่าเพิ่มตรงกัน (${actualVat}) ไม่ต้องแก้ไขเพิ่มเติม`);
                   }
                   // --------------------------------------------------------
+                  
+                  // --- 10. เปลี่ยนชื่อไฟล์ (File Rename) ---
+                  try {
+                      const fsRename = require('fs');
+                      const pathRename = require('path');
+                      
+                      // ดึงข้อมูลจาก Excel
+                      const getFlexVal = (tx, kw) => {
+                          const k = Object.keys(tx).find(k => k.replace(/[\n\r\s]/g, '').includes(kw));
+                          return k ? tx[k] : undefined;
+                      };
+                      const oldFileName = getFlexVal(primaryTx, 'ชื่อไฟล์เก่า');
+                      const newFileName = getFlexVal(primaryTx, 'ชื่อไฟล์ใหม่');
+                      
+                      if (oldFileName && String(oldFileName).trim() && newFileName && String(newFileName).trim()) {
+                          const oldFileStr = String(oldFileName).trim();
+                          const newFileStr = String(newFileName).trim();
+                          const excelDir = pathRename.dirname(job.excelPath);
+                          
+                          // หาไฟล์ต้นทางในโฟลเดอร์เดียวกับ Excel
+                          const srcPath = pathRename.join(excelDir, oldFileStr);
+                          
+                          if (fsRename.existsSync(srcPath)) {
+                              // ดึงนามสกุลไฟล์เดิม
+                              const fileExt = pathRename.extname(oldFileStr);
+                              
+                              // ตรวจสอบ vatStatus จาก DB และยอด VAT จาก Excel
+                              const isVatRegistered = job.vatStatus === 'registered';
+                              const hasVatAmount = expectedVat > 0;
+                              
+                              // เช็ค WHT จาก Excel (ทุก row ในบิลนี้)
+                              let hasWhtForName = false;
+                              for (const row of docGroup) {
+                                  const whtV = getFlexVal(row, 'เปอร์เซ็นต์หักณที่จ่าย') || getFlexVal(row, 'หักณที่จ่าย');
+                                  if (whtV && parseFloat(String(whtV).replace(/[^0-9.]/g, '')) > 0) {
+                                      hasWhtForName = true;
+                                      break;
+                                  }
+                              }
+                              
+                              let destName = '';
+                              const whtPrefix = hasWhtForName ? 'WHT ' : '';
+                              
+                              if (isVatRegistered && hasVatAmount) {
+                                  // จดทะเบียนภาษี + มียอด VAT → [WHT] dd_mm_yyyy EXP-NUMBER ชื่อไฟล์ใหม่ VAT
+                                  let dateForName = '';
+                                  const rawDate = primaryTx['วันที่'];
+                                  if (rawDate) {
+                                      let dStr = String(rawDate).trim();
+                                      if (!isNaN(dStr) && Number(dStr) >= 20000) {
+                                          const d = new Date(Math.round((Number(dStr) - 25569) * 86400 * 1000));
+                                          dateForName = `${String(d.getDate()).padStart(2,'0')}_${String(d.getMonth()+1).padStart(2,'0')}_${d.getFullYear()}`;
+                                      } else if (dStr.includes('/')) {
+                                          dateForName = dStr.replace(/\//g, '_');
+                                      } else if (dStr.includes('-')) {
+                                          const p = dStr.split('-');
+                                          if (p.length === 3) dateForName = `${p[2]}_${p[1]}_${p[0]}`;
+                                      }
+                                  }
+                                  destName = `${whtPrefix}${dateForName} ${finalDocId} ${newFileStr} VAT${fileExt}`;
+                              } else {
+                                  // ยังไม่จดภาษี หรือ จดแล้วแต่ไม่มียอด VAT → [WHT] EXP-NUMBER ชื่อไฟล์ใหม่
+                                  destName = `${whtPrefix}${finalDocId} ${newFileStr}${fileExt}`;
+                              }
+                              
+                              const destPath = pathRename.join(excelDir, destName);
+                              
+                              addLog(job.id, 'info', `📁 กำลังคัดลอกและเปลี่ยนชื่อไฟล์...`);
+                              addLog(job.id, 'info', `   ต้นฉบับ: ${oldFileStr}`);
+                              addLog(job.id, 'info', `   ชื่อใหม่: ${destName}`);
+                              
+                              fsRename.copyFileSync(srcPath, destPath);
+                              addLog(job.id, 'success', `✅ เปลี่ยนชื่อไฟล์สำเร็จ: ${destName}`);
+                              
+                              // --- 10.5 อัปโหลดไฟล์เข้า PEAK (ลากไฟล์ไปวางใน uploadBox) ---
+                              try {
+                                  addLog(job.id, 'info', `📤 กำลังอัปโหลดไฟล์ ${destName} เข้า PEAK...`);
+                                  
+                                  // เลื่อนหน้าลงไปหา uploadBox
+                                  const uploadBox = page.locator('.uploadBox').first();
+                                  await uploadBox.scrollIntoViewIfNeeded();
+                                  await page.waitForTimeout(500);
+                                  
+                                  // วิธี 1: หา hidden input[type="file"] ใกล้ๆ uploadBox
+                                  let uploaded = false;
+                                  const fileInput = page.locator('input[type="file"]').first();
+                                  
+                                  if (await fileInput.count() > 0) {
+                                      await fileInput.setInputFiles(destPath);
+                                      uploaded = true;
+                                      addLog(job.id, 'info', `📤 อัปโหลดผ่าน input[type="file"] (วิธี 1)`);
+                                  }
+                                  
+                                  // วิธี 2: ใช้ filechooser event (กดปุ่ม "เพิ่มไฟล์ใหม่" แล้วเลือกไฟล์)
+                                  if (!uploaded) {
+                                      try {
+                                          const addFileBtn = page.locator('button', { hasText: 'เพิ่มไฟล์ใหม่' }).first();
+                                          if (await addFileBtn.isVisible({ timeout: 2000 })) {
+                                              const [fileChooser] = await Promise.all([
+                                                  page.waitForEvent('filechooser', { timeout: 5000 }),
+                                                  addFileBtn.click({ force: true })
+                                              ]);
+                                              await fileChooser.setFiles(destPath);
+                                              uploaded = true;
+                                              addLog(job.id, 'info', `📤 อัปโหลดผ่านปุ่ม "เพิ่มไฟล์ใหม่" (วิธี 2)`);
+                                          }
+                                      } catch (fcErr) {}
+                                  }
+                                  
+                                  if (uploaded) {
+                                      await page.waitForTimeout(2000); // รอ PEAK ประมวลผลไฟล์
+                                      addLog(job.id, 'success', `✅ อัปโหลดไฟล์เข้า PEAK สำเร็จ: ${destName}`);
+                                  } else {
+                                      addLog(job.id, 'warn', `⚠️ ไม่สามารถอัปโหลดไฟล์เข้า PEAK ได้อัตโนมัติ`);
+                                  }
+                              } catch (uploadErr) {
+                                  addLog(job.id, 'warn', `⚠️ เกิดข้อผิดพลาดขณะอัปโหลดไฟล์: ${uploadErr.message}`);
+                              }
+                              
+                              // --- 10.6 จัดระเบียบไฟล์ (ย้ายไฟล์เข้าโฟลเดอร์) ---
+                              try {
+                                  addLog(job.id, 'info', `📂 กำลังจัดระเบียบไฟล์...`);
+                                  
+                                  // 1. ย้ายไฟล์ต้นฉบับ → โฟลเดอร์ "ต้นฉบับ"
+                                  const origDir = pathRename.join(excelDir, 'ต้นฉบับ');
+                                  fsRename.mkdirSync(origDir, { recursive: true });
+                                  const origDest = pathRename.join(origDir, oldFileStr);
+                                  fsRename.renameSync(srcPath, origDest);
+                                  addLog(job.id, 'info', `   📁 ย้ายต้นฉบับ → ต้นฉบับ/${oldFileStr}`);
+                                  
+                                  // 2. ย้ายไฟล์ที่ตั้งชื่อใหม่ → โฟลเดอร์ "เอกสารบันทึกแล้ว/{WHT|VAT|NoneVat}"
+                                  // เช็คเงื่อนไข WHT / VAT จากข้อมูลใน Excel
+                                  let hasWht = false;
+                                  for (const row of docGroup) {
+                                      const whtVal = getFlexVal(row, 'เปอร์เซ็นต์หักณที่จ่าย') || getFlexVal(row, 'หักณที่จ่าย');
+                                      if (whtVal && parseFloat(String(whtVal).replace(/[^0-9.]/g, '')) > 0) {
+                                          hasWht = true;
+                                          break;
+                                      }
+                                  }
+                                  
+                                  let subFolder = 'NoneVat';
+                                  if (hasWht) {
+                                      subFolder = 'WHT';
+                                  } else if (hasVatAmount) {
+                                      subFolder = 'VAT';
+                                  }
+                                  
+                                  const recordedDir = pathRename.join(excelDir, 'เอกสารบันทึกแล้ว', subFolder);
+                                  fsRename.mkdirSync(recordedDir, { recursive: true });
+                                  const recordedDest = pathRename.join(recordedDir, destName);
+                                  fsRename.renameSync(destPath, recordedDest);
+                                  addLog(job.id, 'success', `   📁 ย้ายไฟล์ใหม่ → เอกสารบันทึกแล้ว/${subFolder}/${destName}`);
+                                  
+                                  addLog(job.id, 'success', `✅ จัดระเบียบไฟล์เสร็จสมบูรณ์`);
+                              } catch (moveErr) {
+                                  addLog(job.id, 'warn', `⚠️ เกิดข้อผิดพลาดขณะย้ายไฟล์: ${moveErr.message}`);
+                              }
+                          } else {
+                              addLog(job.id, 'warn', `⚠️ ไม่พบไฟล์ต้นทาง: ${oldFileStr} ในโฟลเดอร์ ${excelDir}`);
+                          }
+                      }
+                  } catch (renameErr) {
+                      addLog(job.id, 'warn', `⚠️ เกิดข้อผิดพลาดขณะเปลี่ยนชื่อไฟล์: ${renameErr.message}`);
+                  }
                   
               } catch (extractErr) {
                   addLog(job.id, "warn", `⚠️ ไม่สามารถดึงเลขที่เอกสารใหม่ได้ (อาจบันทึกสำเร็จแต่หา element ไม่เจอ): ${extractErr.message}`);

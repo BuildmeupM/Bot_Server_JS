@@ -19,8 +19,8 @@ const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.ti
 const TAB_FILTERS = {
     split: f => !f.isDirectory && f.isPdf,
     unlock: f => !f.isDirectory && f.isPdf,
-    merge: f => !f.isDirectory && f.isPdf,
-    pdfimg: f => !f.isDirectory && f.isPdf,
+    merge: f => f.isDirectory || f.isPdf || IMAGE_EXTENSIONS.includes(f.name.toLowerCase().slice(f.name.lastIndexOf('.'))),
+    pdfimg: f => f.isDirectory || f.isPdf,
     imgpdf: f => !f.isDirectory && IMAGE_EXTENSIONS.includes(f.name.toLowerCase().slice(f.name.lastIndexOf('.'))),
     heic: f => !f.isDirectory && ['.heic', '.heif'].includes(f.name.toLowerCase().slice(f.name.lastIndexOf('.'))),
     rar: f => !f.isDirectory && ['.rar', '.zip', '.7z'].includes(f.name.toLowerCase().slice(f.name.lastIndexOf('.'))),
@@ -280,6 +280,7 @@ export default function ToolsPage() {
     const [splitPattern, setSplitPattern] = useState('')
     const [outputDir, setOutputDir] = useState('')
     const [splitting, setSplitting] = useState(false)
+    const [createSubfolder, setCreateSubfolder] = useState(true)
 
     // Chunk builder state
     const [pageChunkMap, setPageChunkMap] = useState({})  // { pageNum: chunkIndex }
@@ -476,7 +477,8 @@ export default function ToolsPage() {
                 filePath: splitFile.path,
                 outputDir,
                 filenamePattern: splitPattern,
-                splitMode
+                splitMode,
+                createSubfolder: splitMode === 'all' ? createSubfolder : false
             }
             if (splitMode === 'selected') payload.pages = selectedPages
             if (splitMode === 'range') payload.pages = pageRange
@@ -968,6 +970,39 @@ export default function ToolsPage() {
                                             </div>
                                         </div>
 
+                                        {splitMode === 'all' && (
+                                            <div className="form-group">
+                                                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
+                                                    onClick={() => setCreateSubfolder(v => !v)}>
+                                                    <div style={{
+                                                        width: 20, height: 20, borderRadius: 5,
+                                                        border: `2px solid ${createSubfolder ? 'var(--accent)' : '#d1d5db'}`,
+                                                        background: createSubfolder ? 'var(--accent)' : '#fff',
+                                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                        transition: 'all .15s ease', flexShrink: 0
+                                                    }}>
+                                                        {createSubfolder && <span style={{ color: '#fff', fontSize: 13, fontWeight: 700, lineHeight: 1 }}>✓</span>}
+                                                    </div>
+                                                    <div>
+                                                        <div style={{ fontWeight: 600, fontSize: 13 }}>📁 สร้างโฟลเดอร์คุม</div>
+                                                        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 1 }}>
+                                                            สร้างโฟลเดอร์ชื่อเดียวกับไฟล์ PDF เพื่อเก็บไฟล์ที่แยก
+                                                        </div>
+                                                    </div>
+                                                </label>
+                                                {createSubfolder && splitFile && (
+                                                    <div style={{
+                                                        marginTop: 8, padding: '8px 12px', borderRadius: 8,
+                                                        background: '#f0fdf4', border: '1px solid #bbf7d0',
+                                                        fontSize: 12, color: '#15803d', display: 'flex', alignItems: 'center', gap: 6
+                                                    }}>
+                                                        📂 <span style={{ fontWeight: 600 }}>{splitFile.name.replace('.pdf', '')}</span>
+                                                        <span style={{ color: '#6b7280' }}>/ (โฟลเดอร์ใหม่)</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
 
 
                                         {splitMode === 'range' && (
@@ -1235,33 +1270,55 @@ export default function ToolsPage() {
                     <div className="animate-in" style={{ maxWidth: 700 }}>
                         {currentPath && (
                             <div className="card" style={{ marginBottom: 20 }}>
-                                <div className="card-header">
-                                    <h3>📑 เลือกไฟล์ PDF ที่จะรวม</h3>
-                                    {files.length > 0 && (
-                                        <button className="btn-sm" onClick={selectAllMerge} style={{ fontSize: 11 }}>
-                                            {mergeSelectedFiles.length === files.length ? 'ยกเลิกทั้งหมด' : 'เลือกทั้งหมด'}
-                                        </button>
-                                    )}
+                                <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                                        <h3 style={{ margin: 0 }}>📑 เลือกไฟล์ PDF และรูปภาพที่จะรวม</h3>
+                                        {files.filter(f => !f.isDirectory).length > 0 && (
+                                            <button className="btn-sm" onClick={selectAllMerge} style={{ fontSize: 11 }}>
+                                                {mergeSelectedFiles.length === files.filter(f => !f.isDirectory).length && files.filter(f => !f.isDirectory).length > 0 ? 'ยกเลิกทั้งหมด' : 'เลือกทั้งหมด'}
+                                            </button>
+                                        )}
+                                    </div>
+                                    <button className="btn-sm btn-ghost" title="กลับโฟลเดอร์ก่อนหน้า"
+                                        onClick={() => {
+                                            const parentPath = currentPath.substring(0, Math.max(currentPath.lastIndexOf('\\'), currentPath.lastIndexOf('/')));
+                                            if (parentPath) { setPathInput(parentPath); loadFiles(parentPath); }
+                                        }}
+                                        style={{ fontSize: 12, padding: '4px 8px' }}>
+                                        ⬅️ กลับขึ้นไป
+                                    </button>
                                 </div>
                                 <div style={{ maxHeight: 250, overflowY: 'auto' }}>
                                     {files.map(f => {
                                         const isSelected = mergeSelectedFiles.find(s => s.path === f.path)
+                                        const isImage = !f.isDirectory && IMAGE_EXTENSIONS.includes(f.name.toLowerCase().slice(f.name.lastIndexOf('.')))
                                         return (
                                             <div key={f.path}
                                                 className={`file-list-item ${isSelected ? 'selected' : ''}`}
-                                                onClick={() => toggleMergeFile(f)}>
-                                                <div className="file-icon">📄</div>
+                                                onClick={() => {
+                                                    if (f.isDirectory) {
+                                                        setPathInput(f.path);
+                                                        loadFiles(f.path);
+                                                    } else {
+                                                        toggleMergeFile(f);
+                                                    }
+                                                }}>
+                                                <div className="file-icon" style={{ background: f.isDirectory ? '#fffbeb' : isImage ? '#f0fdf4' : '#f1f5f9', color: f.isDirectory ? '#f59e0b' : isImage ? '#16a34a' : '#64748b' }}>
+                                                    {f.isDirectory ? '📁' : isImage ? '🖼️' : '📄'}
+                                                </div>
                                                 <div className="file-info">
                                                     <div className="file-name">{f.name}</div>
-                                                    <div className="file-meta">{formatSize(f.size)}</div>
+                                                    <div className="file-meta">{f.isDirectory ? 'โฟลเดอร์' : formatSize(f.size)}</div>
                                                 </div>
-                                                <div style={{ marginLeft: 'auto', width: 22, height: 22, borderRadius: 6, border: isSelected ? '2px solid var(--accent)' : '2px solid #ddd', background: isSelected ? 'var(--accent)' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
-                                                    {isSelected ? '✓' : ''}
-                                                </div>
+                                                {!f.isDirectory && (
+                                                    <div style={{ marginLeft: 'auto', width: 22, height: 22, borderRadius: 6, border: isSelected ? '2px solid var(--accent)' : '2px solid #ddd', background: isSelected ? 'var(--accent)' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+                                                        {isSelected ? '✓' : ''}
+                                                    </div>
+                                                )}
                                             </div>
                                         )
                                     })}
-                                    {files.length === 0 && !loading && <p style={{ padding: 20, textAlign: 'center', color: '#999' }}>ไม่พบไฟล์ PDF</p>}
+                                    {files.length === 0 && !loading && <p style={{ padding: 20, textAlign: 'center', color: '#999' }}>ไม่พบไฟล์หรือโฟลเดอร์</p>}
                                 </div>
                             </div>
                         )}
@@ -1308,21 +1365,42 @@ export default function ToolsPage() {
                         <div style={{ flex: 1, minWidth: 0, maxWidth: pdfImgPreviewFile ? '55%' : 700 }}>
                             {currentPath && (
                                 <div className="card" style={{ marginBottom: 20 }}>
-                                    <div className="card-header"><h3>📄 เลือกไฟล์ PDF ที่จะแปลงเป็นรูป</h3></div>
+                                    <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <h3 style={{ margin: 0 }}>📄 เลือกไฟล์ PDF ที่จะแปลงเป็นรูป</h3>
+                                        <button className="btn-sm btn-ghost" title="กลับโฟลเดอร์ก่อนหน้า"
+                                            onClick={() => {
+                                                const parentPath = currentPath.substring(0, Math.max(currentPath.lastIndexOf('\\'), currentPath.lastIndexOf('/')));
+                                                if (parentPath) { setPathInput(parentPath); loadFiles(parentPath); }
+                                            }}
+                                            style={{ fontSize: 12, padding: '4px 8px' }}>
+                                            ⬅️ กลับขึ้นไป
+                                        </button>
+                                    </div>
                                     <div style={{ maxHeight: 250, overflowY: 'auto' }}>
                                         {files.map(f => (
                                             <div key={f.path}
                                                 className={`file-list-item ${pdfImgFile?.path === f.path ? 'selected' : ''}`}
-                                                onClick={() => { setPdfImgFile(f); setPdfImgResult(null); setPdfImgPreviewFile({ name: f.name, fullPath: f.path }); setPdfImgOutputName(f.name.replace(/\.pdf$/i, '')) }}>
-                                                <div className="file-icon">📄</div>
+                                                onClick={() => {
+                                                    if (f.isDirectory) {
+                                                        setPathInput(f.path);
+                                                        loadFiles(f.path);
+                                                    } else {
+                                                        setPdfImgFile(f); setPdfImgResult(null); setPdfImgPreviewFile({ name: f.name, fullPath: f.path }); setPdfImgOutputName(f.name.replace(/\.pdf$/i, ''));
+                                                    }
+                                                }}>
+                                                <div className="file-icon" style={{ background: f.isDirectory ? '#fffbeb' : '#f1f5f9', color: f.isDirectory ? '#f59e0b' : '#64748b' }}>
+                                                    {f.isDirectory ? '📁' : '📄'}
+                                                </div>
                                                 <div className="file-info">
                                                     <div className="file-name">{f.name}</div>
-                                                    <div className="file-meta">{formatSize(f.size)}</div>
+                                                    <div className="file-meta">{f.isDirectory ? 'โฟลเดอร์' : formatSize(f.size)}</div>
                                                 </div>
-                                                <button className="btn-sm btn-ghost" title="พรีวิว" onClick={e => { e.stopPropagation(); setPdfImgPreviewFile({ name: f.name, fullPath: f.path }) }} style={{ fontSize: 12, padding: '2px 6px', flexShrink: 0, background: pdfImgPreviewFile?.fullPath === f.path ? 'var(--accent)' : undefined, color: pdfImgPreviewFile?.fullPath === f.path ? '#fff' : undefined, borderRadius: 4 }}>🔍</button>
+                                                {!f.isDirectory && (
+                                                    <button className="btn-sm btn-ghost" title="พรีวิว" onClick={e => { e.stopPropagation(); setPdfImgPreviewFile({ name: f.name, fullPath: f.path }) }} style={{ fontSize: 12, padding: '2px 6px', flexShrink: 0, background: pdfImgPreviewFile?.fullPath === f.path ? 'var(--accent)' : undefined, color: pdfImgPreviewFile?.fullPath === f.path ? '#fff' : undefined, borderRadius: 4 }}>🔍</button>
+                                                )}
                                             </div>
                                         ))}
-                                        {files.length === 0 && !loading && <p style={{ padding: 20, textAlign: 'center', color: '#999' }}>ไม่พบไฟล์ PDF</p>}
+                                        {files.length === 0 && !loading && <p style={{ padding: 20, textAlign: 'center', color: '#999' }}>ไม่พบไฟล์ PDF หรือโฟลเดอร์</p>}
                                     </div>
                                 </div>
                             )}

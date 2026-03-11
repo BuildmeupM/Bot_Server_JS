@@ -242,10 +242,23 @@ export default function OcrBatchPanel() {
     const handleStartBot = async () => {
         if (!botMatchedProfile) return
         try {
-            const res = await getExcelFiles()
+            // Check if user exactly entered a file
+            if (botExcelPath && (botExcelPath.toLowerCase().endsWith('.xlsx') || botExcelPath.toLowerCase().endsWith('.xls'))) {
+                executeStartBot(botExcelPath)
+                return
+            }
+
+            // Otherwise, get files from directory (extract directory if entered path looks like a filename but missing extension)
+            let dirParam = botExcelPath;
+            if (botExcelPath && /\.[a-z0-9]+$/i.test(botExcelPath)) {
+                // Remove the filename part
+                dirParam = botExcelPath.substring(0, Math.max(botExcelPath.lastIndexOf('\\'), botExcelPath.lastIndexOf('/')));
+            }
+
+            const res = await getExcelFiles(dirParam)
             const files = res.data.files || []
             if (files.length === 0) {
-                toast.error('ไม่พบไฟล์ข้อมูล Excel ในโฟลเดอร์ uploads')
+                toast.error('ไม่พบไฟล์ข้อมูล Excel ในพื้นที่ที่ระบุ')
                 return
             }
             if (files.length === 1) {

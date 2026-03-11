@@ -51,7 +51,7 @@ router.get('/info', authMiddleware, async (req, res) => {
 // POST /api/pdf/split
 router.post('/split', authMiddleware, async (req, res) => {
     try {
-        const { filePath, pages, outputDir, filenamePattern, splitMode, chunkSize } = req.body;
+        const { filePath, pages, outputDir, filenamePattern, splitMode, chunkSize, createSubfolder } = req.body;
         if (!filePath || !outputDir) {
             return res.status(400).json({ error: 'กรุณาระบุ path ไฟล์และโฟลเดอร์ผลลัพธ์' });
         }
@@ -70,14 +70,24 @@ router.post('/split', authMiddleware, async (req, res) => {
 
         if (mode === 'all') {
             // ── แยกทุกหน้า ──
+            let actualOutputDir = outputDir;
+            if (createSubfolder) {
+                actualOutputDir = path.join(outputDir, baseName);
+                await fs.ensureDir(actualOutputDir);
+            }
             for (let i = 1; i <= totalPages; i++) {
                 const newPdf = await PDFDocument.create();
                 const [copiedPage] = await newPdf.copyPages(sourcePdf, [i - 1]);
                 newPdf.addPage(copiedPage);
                 const outputName = pattern.replace('{page}', i) + '.pdf';
-                const outputPath = path.join(outputDir, outputName);
+                const outputPath = path.join(actualOutputDir, outputName);
                 await fs.writeFile(outputPath, await newPdf.save());
                 outputFiles.push({ name: outputName, path: outputPath, page: i });
+            }
+            // ย้ายไฟล์ต้นฉบับเข้าโฟลเดอร์คุม
+            if (createSubfolder) {
+                const movedPath = path.join(actualOutputDir, path.basename(filePath));
+                await fs.move(filePath, movedPath, { overwrite: true });
             }
         } else if (mode === 'chunks') {
             // ── แยกเป็นชุด (กำหนดเอง) ──
@@ -159,17 +169,38 @@ router.post('/merge', authMiddleware, async (req, res) => {
     try {
         const { filePaths, outputDir, outputName } = req.body;
         if (!filePaths || !Array.isArray(filePaths) || filePaths.length < 2) {
-            return res.status(400).json({ error: 'กรุณาเลือกไฟล์ PDF อย่างน้อย 2 ไฟล์' });
+            return res.status(400).json({ error: 'กรุณาเลือกไฟล์อย่างน้อย 2 ไฟล์ (PDF หรือรูปภาพ)' });
         }
+
+        const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif'];
+        const sharp = (await import('sharp')).default;
 
         const mergedPdf = await PDFDocument.create();
         for (const fp of filePaths) {
             const exists = await fs.pathExists(fp);
             if (!exists) return res.status(404).json({ error: `ไม่พบไฟล์: ${path.basename(fp)}` });
+            
+            const ext = path.extname(fp).toLowerCase();
             const fileBuffer = await fs.readFile(fp);
-            const srcPdf = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
-            const copiedPages = await mergedPdf.copyPages(srcPdf, srcPdf.getPageIndices());
-            copiedPages.forEach(p => mergedPdf.addPage(p));
+
+            if (IMAGE_EXTENSIONS.includes(ext)) {
+                // Handle as Image
+                const metadata = await sharp(fileBuffer).metadata();
+                const pngBuffer = await sharp(fileBuffer).png().toBuffer();
+                const pngImage = await mergedPdf.embedPng(pngBuffer);
+                
+                // Convert pixels to points (assuming 96 DPI screen density by default)
+                const pgWidth = metadata.width * 72 / 96;
+                const pgHeight = metadata.height * 72 / 96;
+                
+                const page = mergedPdf.addPage([pgWidth, pgHeight]);
+                page.drawImage(pngImage, { x: 0, y: 0, width: pgWidth, height: pgHeight });
+            } else {
+                // Handle as PDF
+                const srcPdf = await PDFDocument.load(fileBuffer, { ignoreEncryption: true });
+                const copiedPages = await mergedPdf.copyPages(srcPdf, srcPdf.getPageIndices());
+                copiedPages.forEach(p => mergedPdf.addPage(p));
+            }
         }
 
         const destDir = outputDir || path.dirname(filePaths[0]);

@@ -88,7 +88,7 @@ export const createBotCredential = (data) => api.post('/bot-database/credentials
 export const deleteBotCredential = (id) => api.delete(`/bot-database/credentials/${id}`);
 
 // Bot Automation (Queue System)
-export const getExcelFiles = () => api.get('/bot-automation/excel-files');
+export const getExcelFiles = (dir) => api.get('/bot-automation/excel-files', { params: { dir } });
 export const startBot = (data) => api.post('/bot-automation/start', data);
 export const getBotJobs = () => api.get('/bot-automation/jobs');
 export const getBotLogs = (jobId) => api.get(`/bot-automation/logs/${jobId}`);

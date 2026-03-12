@@ -8,6 +8,16 @@
 const ExcelJS = require('exceljs');
 
 // ──────────────────────────────────────────────
+// 0) Extract BL reference from filename
+// ──────────────────────────────────────────────
+//  Pattern: BL-XXXXXXXXX (e.g., Wht_vat_BL-262289251 EXC2602-107_007.pdf → BL-262289251)
+function extractBLReference(fileName) {
+    if (!fileName) return '';
+    const match = fileName.match(/BL-[A-Za-z0-9]+/i);
+    return match ? match[0] : '';
+}
+
+// ──────────────────────────────────────────────
 // 1) Parse file naming pattern
 // ──────────────────────────────────────────────
 //  Pattern: ประเภท - โค้ดบัญชี_ยอด - ชื่อเดิม - โค้ดชำระ.pdf
@@ -429,6 +439,9 @@ async function buildExcelWorkbook(records, companiesMap) {
         const vatAmount = parseFloat(rec.vat) || 0;
         const hasVat = vatAmount > 0;
 
+        // Extract BL reference from filename (e.g., BL-262289251)
+        const blReference = extractBLReference(rec.file_name);
+
         // Check amount mismatch — เก็บเป็น log (ไม่ใส่ในหมายเหตุ เพราะช่องนี้ไว้ให้ผู้ใช้กรอกเอง)
         let remark = '';
 
@@ -459,7 +472,7 @@ async function buildExcelWorkbook(records, companiesMap) {
                 rec.vat || '',                          // ยอด VAT
                 rec.total || '',                        // ยอดหลัง VAT
                 payCodeStr,                             // โค้ดชำระ
-                '',                                     // อ้างอิง
+                blReference,                            // อ้างอิง (BL reference จากชื่อไฟล์)
                 remark,                                 // หมายเหตุ
                 parsed.originalName || rec.file_name || '', // ชื่อไฟล์ใหม่ (ชื่อเดิม)
                 rec.file_name || '',                    // ชื่อไฟล์เก่า (ชื่อเต็ม)
@@ -481,7 +494,7 @@ async function buildExcelWorkbook(records, companiesMap) {
                     i === 0 ? (rec.vat || '') : '',
                     ac.amount || (i === 0 ? (rec.total || '') : ''),  // ยอดแยกหรือยอดรวม
                     i === 0 ? payCodeStr : '',
-                    '',
+                    i === 0 ? blReference : '',          // อ้างอิง (BL reference จากชื่อไฟล์)
                     i === 0 ? remark : '',
                     i === 0 ? (parsed.originalName || rec.file_name || '') : '', // ชื่อไฟล์ใหม่ (ชื่อเดิม)
                     i === 0 ? (rec.file_name || '') : '',  // ชื่อไฟล์เก่า (ชื่อเต็ม)

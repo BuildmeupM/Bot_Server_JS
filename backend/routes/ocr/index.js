@@ -927,10 +927,10 @@ router.post('/batch-process', authMiddleware, async (req, res) => {
             });
         }
 
-        if (filePaths.length > 50) {
+        if (filePaths.length > 500) {
             return res.status(400).json({
                 success: false,
-                error: 'รองรับสูงสุด 50 ไฟล์ต่อ batch'
+                error: 'รองรับสูงสุด 500 ไฟล์ต่อ batch'
             });
         }
 

@@ -113,8 +113,18 @@ flowchart TD
 
     PAY1["📋 11. คลิก tab 'ข้อมูลการชำระ'"] --> PAY2["💰 คลิกปุ่ม 'จ่ายชำระ'"]
     PAY2 --> PAY3["⏳ รอ Modal ชำระเงิน"]
-    PAY3 --> PAY4["✍️ กรอกโค้ดใน 'ชำระโดย'<br/>เลือกจาก dropdown"]
-    PAY4 --> PAY5["💳 คลิก 'ชำระเงิน'"]
+    PAY3 --> PAY3A["🔘 เลือก 'ขั้นสูง'"]
+    PAY3A --> PAY_TYPE{"โค้ดชำระเป็นตัวเลข<br/>หรือตัวอักษร?"}
+
+    PAY_TYPE -- "🔢 ตัวเลข เช่น 212201" --> PAY_NUM1["☑️ ติ๊ก 'ค่าธรรมเนียม'"]
+    PAY_NUM1 --> PAY_NUM2["🔍 คลิก p.textBlue.crop<br/>เปิด multiselect ค่าธรรมเนียม<br/>พิมพ์รหัสบัญชี → เลือก"]
+    PAY_NUM2 --> PAY_NUM3["💰 ดึงยอดจาก span.totalAmount<br/>ตัวที่ 2 = 'ชำระด้วยเงินรวม'<br/>กรอกใน 'จำนวนเงินที่ปรับปรุง'"]
+    PAY_NUM3 --> PAY5
+
+    PAY_TYPE -- "🔤 ตัวอักษร เช่น CSH001" --> PAY_TXT1["✍️ กรอกโค้ดใน 'ชำระโดย'<br/>เลือกจาก dropdown"]
+    PAY_TXT1 --> PAY5
+
+    PAY5["💳 คลิก 'ชำระเงิน'"]
     PAY5 --> DONE_BILL
 
     DONE_BILL["✅ จบบิลนี้"]
@@ -125,6 +135,9 @@ flowchart TD
     NEXT -- "❌ หมดแล้ว" --> FINISH
 
     FINISH(["🎉 Job เสร็จสมบูรณ์"])
+
+    PAY_TYPE -.- PAY_TYPE_NOTE["📌 ตรวจด้วย: /^\\d+$/<br/>ตัวเลขล้วน = รหัสบัญชี<br/>มีตัวอักษร = ช่องทางการเงิน"]
+    PAY_NUM3 -.- PAY_AMT_NOTE["📌 span.totalAmount มี 3 ตัว:<br/>index 0 = ปรับปรุงรวม<br/>index 1 = ชำระด้วยเงินรวม ✅<br/>index 2 = ภาษีหัก ณ ที่จ่าย"]
 
     %% ── Styles ──
     style A fill:#f97316,color:#fff,stroke:none
@@ -141,6 +154,14 @@ flowchart TD
     style FILE_UPLOAD fill:#14b8a6,color:#fff,stroke:none
     style FILE_MOVE fill:#f59e0b,color:#000,stroke:none
     style FILE_NAME_NOTE fill:#1e293b,color:#94a3b8,stroke:#334155,stroke-dasharray:5
+    style PAY_TYPE_NOTE fill:#1e293b,color:#94a3b8,stroke:#334155,stroke-dasharray:5
     style PAY1 fill:#8b5cf6,color:#fff,stroke:none
+    style PAY3A fill:#6366f1,color:#fff,stroke:none
+    style PAY_TYPE fill:#f59e0b,color:#000,stroke:none
+    style PAY_NUM1 fill:#06b6d4,color:#fff,stroke:none
+    style PAY_NUM2 fill:#06b6d4,color:#fff,stroke:none
+    style PAY_NUM3 fill:#0d9488,color:#fff,stroke:none
+    style PAY_TXT1 fill:#3b82f6,color:#fff,stroke:none
+    style PAY_AMT_NOTE fill:#1e293b,color:#94a3b8,stroke:#334155,stroke-dasharray:5
     style PAY5 fill:#22c55e,color:#fff,stroke:none
 ```

@@ -333,28 +333,45 @@ async function processWorker(job, workerIndex, apiUrl) {
                 });
             }
 
-            // 4. ส่งไปยัง AksornOCR
-            const form = new FormData();
-            const ext = path.extname(fileName).toLowerCase();
-            const mimeType = ext === '.pdf' ? 'application/pdf'
-                : ext === '.png' ? 'image/png'
-                    : 'image/jpeg';
+            // 4. ส่งไปยัง AksornOCR (พร้อม Retry สำหรับ Timeout)
+            const MAX_RETRIES = 1;
+            const OCR_TIMEOUT = 120000; // 120 วินาที
+            let ocrResponse = null;
 
-            form.append('file', processedBuffer, {
-                filename: fileName,
-                contentType: mimeType
-            });
-            form.append('model', 'aksonocr-1.0');
-            form.append('customFields', JSON.stringify(FINANCIAL_DOCUMENT_FIELDS));
+            for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                try {
+                    const form = new FormData();
+                    const ext = path.extname(fileName).toLowerCase();
+                    const mimeType = ext === '.pdf' ? 'application/pdf'
+                        : ext === '.png' ? 'image/png'
+                            : 'image/jpeg';
 
-            const ocrResponse = await axios.post(apiUrl, form, {
-                headers: {
-                    ...form.getHeaders(),
-                    'X-API-Key': worker.apiKey
-                },
-                timeout: 60000,
-                validateStatus: () => true
-            });
+                    form.append('file', processedBuffer, {
+                        filename: fileName,
+                        contentType: mimeType
+                    });
+                    form.append('model', 'aksonocr-1.0');
+                    form.append('customFields', JSON.stringify(FINANCIAL_DOCUMENT_FIELDS));
+
+                    ocrResponse = await axios.post(apiUrl, form, {
+                        headers: {
+                            ...form.getHeaders(),
+                            'X-API-Key': worker.apiKey
+                        },
+                        timeout: OCR_TIMEOUT,
+                        validateStatus: () => true
+                    });
+                    break; // สำเร็จ → ออกจาก retry loop
+                } catch (retryErr) {
+                    const isTimeout = retryErr.code === 'ECONNABORTED' || retryErr.message?.includes('timeout');
+                    if (isTimeout && attempt < MAX_RETRIES) {
+                        console.log(`  🔄 Worker ${worker.workerId}: ${fileName} — timeout, ลองใหม่ครั้งที่ ${attempt + 2}...`);
+                        await new Promise(r => setTimeout(r, 2000)); // รอ 2 วิก่อน retry
+                        continue;
+                    }
+                    throw retryErr; // ไม่ใช่ timeout หรือ retry หมดแล้ว → throw ออกไป
+                }
+            }
 
             // AksornOCR returns 200 or 201 on success
             const isSuccess = ocrResponse.status === 200 || ocrResponse.status === 201;

@@ -1353,12 +1353,57 @@ async function executeJob(job) {
           // 2. เลขที่เอกสาร (Tax Invoice No / Document No) (ทำครั้งเดียวต่อบิล)
           const docNo = primaryTx["เลขที่เอกสาร"];
           if (docNo) {
-              addLog(job.id, "info", `📝 กำลังกรอกเลขที่ใบกำกับภาษี: ${docNo}...`);
+              const docNoStr = String(docNo).trim();
+              addLog(job.id, "info", `📝 กำลังกรอกเลขที่ใบกำกับภาษี: ${docNoStr}...`);
               const taxInvInput = page.getByPlaceholder("ระบุเลขที่ใบกำกับภาษี").first();
               if (await taxInvInput.isVisible()) {
-                  await taxInvInput.fill("");
-                  await taxInvInput.pressSequentially(String(docNo), { delay: 10 });
-                  addLog(job.id, "success", `✅ กรอกเลขที่ใบกำกับภาษี: ${docNo} สำเร็จ`);
+                  // คลิก focus ที่ช่องก่อน
+                  await taxInvInput.click({ force: true });
+                  await page.waitForTimeout(200);
+
+                  // ลบค่าเก่าออกให้หมด
+                  await taxInvInput.press('Control+a');
+                  await taxInvInput.press('Backspace');
+                  await page.waitForTimeout(100);
+
+                  // วิธี 1: ใช้ fill() ซึ่งเร็วและน่าเชื่อถือกว่า pressSequentially
+                  await taxInvInput.fill(docNoStr);
+                  await page.waitForTimeout(300);
+
+                  // ตรวจสอบว่ากรอกครบหรือไม่
+                  let currentVal = await taxInvInput.inputValue();
+                  if (currentVal !== docNoStr) {
+                      addLog(job.id, "warn", `⚠️ fill() ได้ค่าไม่ครบ (ได้: "${currentVal}") — ลอง pressSequentially...`);
+                      // วิธี 2: ล้างแล้วพิมพ์ทีละตัวช้าลง
+                      await taxInvInput.click({ force: true });
+                      await taxInvInput.press('Control+a');
+                      await taxInvInput.press('Backspace');
+                      await page.waitForTimeout(100);
+                      await taxInvInput.pressSequentially(docNoStr, { delay: 20 });
+                      await page.waitForTimeout(300);
+                      
+                      currentVal = await taxInvInput.inputValue();
+                      if (currentVal !== docNoStr) {
+                          addLog(job.id, "warn", `⚠️ pressSequentially ได้ค่าไม่ครบ (ได้: "${currentVal}") — ลอง keyboard.type...`);
+                          // วิธี 3: ใช้ keyboard.type ตรงๆ ช้าสุด
+                          await taxInvInput.click({ force: true });
+                          await taxInvInput.press('Control+a');
+                          await taxInvInput.press('Backspace');
+                          await page.waitForTimeout(100);
+                          await page.keyboard.type(docNoStr, { delay: 80 });
+                          await page.waitForTimeout(300);
+                          currentVal = await taxInvInput.inputValue();
+                      }
+                  }
+                  
+                  // กด Tab เพื่อยืนยันค่าให้ Vue จับ
+                  await taxInvInput.press('Tab');
+                  
+                  if (currentVal === docNoStr) {
+                      addLog(job.id, "success", `✅ กรอกเลขที่ใบกำกับภาษี: ${docNoStr} สำเร็จ (ตรวจสอบแล้วครบถ้วน)`);
+                  } else {
+                      addLog(job.id, "warn", `⚠️ กรอกเลขที่ใบกำกับภาษีอาจไม่ครบ (ต้องการ: "${docNoStr}", ได้: "${currentVal}")`);
+                  }
               } else {
                   addLog(job.id, "warn", `⚠️ หาช่อง 'เลขที่ใบกำกับภาษี' ไม่พบ`);
               }
@@ -1780,8 +1825,9 @@ async function executeJob(job) {
               addLog(job.id, "success", "\u2705 \u0e01\u0e14\u0e1b\u0e38\u0e48\u0e21 '\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01\u0e04\u0e48\u0e32\u0e43\u0e0a\u0e49\u0e08\u0e48\u0e32\u0e22' \u0e40\u0e23\u0e35\u0e22\u0e1a\u0e23\u0e49\u0e2d\u0e22\u0e41\u0e25\u0e49\u0e27");
 
               try {
+                  await page.waitForTimeout(3000); // รอให้หน้าโหลดหลังอนุมัติ
                   const docIdElement = page.locator('span', { hasText: /^#[A-Z]+-\d+$/ }).first();
-                  await docIdElement.waitFor({ state: 'visible', timeout: 15000 });
+                  await docIdElement.waitFor({ state: 'visible', timeout: 30000 });
 
                   const rawData = await docIdElement.innerText();
                   const finalDocId = rawData.replace('#', '').trim();
@@ -2119,95 +2165,224 @@ async function executeJob(job) {
                    // --- 11. Payment Modal ---
                    if (payCodeStr && String(payCodeStr).trim() !== "") {
                        const payCode = String(payCodeStr).trim();
-                       addLog(job.id, "info", `[PAY] Starting payment (code: ${payCode})...`);
+                       addLog(job.id, "info", `[PAY] เริ่มชำระเงิน (code: ${payCode})...`);
                        try {
-                           // Always reload doc page to ensure correct state after VAT/file steps
+                           // ตรวจสอบว่า page ยังเปิดอยู่ — ถ้าปิดแล้วให้เปิดหน้าใหม่
                            if (page.isClosed()) {
                                page = await job.context.newPage();
                                job.page = page;
+                               addLog(job.id, "info", `[PAY] เปิดหน้าใหม่จาก context เดิม`);
+                               await page.goto(
+                                   `https://secure.peakaccount.com/expense/purchaseInventory/${finalDocId}?emi=${job.peakCode}`,
+                                   { waitUntil: 'domcontentloaded', timeout: 30000 }
+                               );
+                               await page.waitForTimeout(4000);
                            }
-                           addLog(job.id, "info", `[PAY] Reloading doc page before payment...`);
-                           await page.goto(
-                               `https://secure.peakaccount.com/expense/purchaseInventory/${finalDocId}?emi=${job.peakCode}`,
-                               { waitUntil: 'domcontentloaded', timeout: 30000 }
-                           );
-                           await page.waitForTimeout(4000);
-                           addLog(job.id, "success", `[PAY] Doc loaded OK`);
 
-                           // 11.1 Click payment tab
+                           // 11.1 คลิก tab "ข้อมูลการชำระ"
+                           addLog(job.id, "info", `[PAY] คลิก tab 'ข้อมูลการชำระ'...`);
                            const paymentTab = page.locator('div.tap p', { hasText: 'ข้อมูลการชำระ' }).first();
                            await paymentTab.waitFor({ state: 'visible', timeout: 15000 });
                            await paymentTab.scrollIntoViewIfNeeded();
                            await paymentTab.click({ force: true });
-                           await page.waitForTimeout(1500);
+                           await page.waitForTimeout(500);
+                           addLog(job.id, "success", `[PAY] คลิก tab 'ข้อมูลการชำระ' สำเร็จ`);
 
-                           // 11.2 Click pay button
+                           // 11.2 คลิกปุ่ม "จ่ายชำระ"
+                           addLog(job.id, "info", `[PAY] คลิกปุ่ม 'จ่ายชำระ'...`);
                            const payBtn = page.locator('div.mint.textblack button', { hasText: 'จ่ายชำระ' }).first();
                            await payBtn.waitFor({ state: 'visible', timeout: 10000 });
                            await payBtn.scrollIntoViewIfNeeded();
                            await payBtn.click({ force: true });
 
-                           // 11.3 Wait for modal AND dropdown content to fully load
+                           // 11.3 รอ Modal "ชำระเงิน" แสดง
+                           addLog(job.id, "info", `[PAY] รอ Modal ชำระเงินแสดง...`);
                            const paymentModal = page.locator('div.modalBox').first();
                            await paymentModal.waitFor({ state: 'visible', timeout: 15000 });
-                           await page.waitForSelector('#DropdownPaymentBankAccount', { state: 'visible', timeout: 15000 });
-                           addLog(job.id, "success", `[PAY] Modal content loaded`);
+                           await page.waitForTimeout(300);
+                           addLog(job.id, "success", `[PAY] Modal ชำระเงินแสดงแล้ว`);
 
-                           // 11.4 Select payment channel via multiselect
-                           let payDropdownBox = null;
-                           const ddSelectors = [
-                               '#DropdownPaymentBankAccount div.multiselect',
-                               '#DropdownPaymentBankAccount .multiselect',
-                               '[id*="PaymentBankAccount"] div.multiselect',
-                               '[id*="PaymentBankAccount"] .multiselect',
-                           ];
-                           for (const sel of ddSelectors) {
+                           // 11.4 คลิก "ขั้นสูง" radio
+                           addLog(job.id, "info", `[PAY] เลือกรูปแบบ 'ขั้นสูง'...`);
+                           const advancedRadio = paymentModal.locator('label', { hasText: 'ขั้นสูง' }).first();
+                           await advancedRadio.waitFor({ state: 'visible', timeout: 5000 });
+                           await advancedRadio.click({ force: true });
+                           await page.waitForTimeout(200);
+                           addLog(job.id, "success", `[PAY] เลือก 'ขั้นสูง' สำเร็จ`);
+
+                           // 11.5 แยกเงื่อนไข: ตัวเลข vs ตัวอักษร
+                           const isNumericCode = /^\d+$/.test(payCode);
+                           addLog(job.id, "info", `[PAY] โค้ด "${payCode}" เป็น${isNumericCode ? 'ตัวเลข → ค่าธรรมเนียม' : 'ตัวอักษร → ช่องทางการเงิน'}`);
+
+                           if (isNumericCode) {
+                               // ═══════════════════════════════════════════
+                               // 🔢 โค้ดเป็นตัวเลข (เช่น 212201)
+                               // → ติ๊ก "ค่าธรรมเนียม" → กรอกรหัสบัญชีใน dropdown
+                               // ═══════════════════════════════════════════
+                               
+                               // 11.5a ติ๊ก checkbox "ค่าธรรมเนียม"
+                               addLog(job.id, "info", `[PAY] ติ๊ก 'ค่าธรรมเนียม'...`);
+                               const feeCheckbox = paymentModal.locator('label', { hasText: 'ค่าธรรมเนียม' }).first();
+                               await feeCheckbox.waitFor({ state: 'visible', timeout: 5000 });
+                               await feeCheckbox.click({ force: true });
+                               await page.waitForTimeout(200);
+                               addLog(job.id, "success", `[PAY] ติ๊ก 'ค่าธรรมเนียม' สำเร็จ`);
+
+                               // 11.5b กรอกรหัสบัญชีค่าธรรมเนียม (multiselect)
+                               addLog(job.id, "info", `[PAY] กรอกรหัสบัญชี: ${payCode}...`);
+                               
+                               // รอให้ section ค่าธรรมเนียมปรากฏหลังติ๊ก checkbox
+                               await page.waitForTimeout(1000);
+                               
+                               // คลิกที่ p.textBlue.crop เพื่อเปิด dropdown ค่าธรรมเนียม
+                               // (element ตัวสุดท้ายใน modal — อันที่เพิ่งปรากฏหลังติ๊ก)
+                               const feeLabel = paymentModal.locator('span.multiselect__single p.textBlue.crop').last();
+                               await feeLabel.scrollIntoViewIfNeeded();
+                               await feeLabel.click({ force: true });
+                               await page.waitForTimeout(500);
+                               addLog(job.id, "info", `[PAY] เปิด dropdown ค่าธรรมเนียมแล้ว`);
+
+                               // input.multiselect__input มี style width:0 position:absolute
+                               // ใช้ page.keyboard.type() แทนเพราะ input ถูก focus อัตโนมัติหลังคลิก
+                               await page.keyboard.type(payCode, { delay: 20 });
+                               await page.waitForTimeout(1500);
+
+                               // เลือกจาก dropdown options ที่แสดง
+                               let isSelected = false;
                                try {
-                                   const el = page.locator(sel).first();
-                                   await el.waitFor({ state: 'visible', timeout: 5000 });
-                                   payDropdownBox = el;
-                                   break;
+                                   const visibleOpts = page.locator('.multiselect__content-wrapper[style*="display"]:not([style*="none"]) li.multiselect__element, .multiselect__content-wrapper:visible li.multiselect__element');
+                                   const optCount = await visibleOpts.count();
+                                   for (let i = 0; i < optCount; i++) {
+                                       const label = await visibleOpts.nth(i).innerText();
+                                       if (label && label.includes(payCode)) {
+                                           await visibleOpts.nth(i).click({ force: true });
+                                           isSelected = true;
+                                           addLog(job.id, "success", `[PAY] เลือกรหัสบัญชี: ${label.trim()} สำเร็จ`);
+                                           break;
+                                       }
+                                   }
+                                   if (!isSelected && optCount > 0) {
+                                       await visibleOpts.first().click({ force: true });
+                                       isSelected = true;
+                                       const firstLabel = await visibleOpts.first().innerText().catch(() => '');
+                                       addLog(job.id, "info", `[PAY] เลือกรายการแรก: ${firstLabel.trim()}`);
+                                   }
                                } catch (e) {}
-                           }
-                           if (!payDropdownBox) {
-                               throw new Error('[PAY] Cannot find #DropdownPaymentBankAccount in Modal');
-                           }
-                           await payDropdownBox.scrollIntoViewIfNeeded();
-                           await payDropdownBox.locator('.multiselect__tags').click({ force: true });
-                           await page.waitForTimeout(500);
-                           const payInput = payDropdownBox.locator('input.multiselect__input');
-                           await payInput.click({ force: true });
-                           await payInput.fill('');
-                           await payInput.pressSequentially(payCode, { delay: 30 });
-                           await page.waitForTimeout(1500);
+                               if (!isSelected) {
+                                   await page.keyboard.press('Enter');
+                                   await page.waitForTimeout(500);
+                                   addLog(job.id, "info", `[PAY] กด Enter เลือกรายการแรก`);
+                               }
 
-                           const ddOptions = payDropdownBox.locator('ul.multiselect__content li.multiselect__element');
-                           try { await ddOptions.first().waitFor({ state: 'visible', timeout: 3000 }); } catch (e) {}
-                           const optCount = await ddOptions.count();
-                           let isSelected = false;
-                           for (let i = 0; i < optCount; i++) {
-                               const label = await ddOptions.nth(i).innerText();
-                               if (label && label.replace(/[\n\r]/g, ' ').includes(payCode)) {
-                                   await ddOptions.nth(i).click({ force: true });
-                                   isSelected = true;
-                                   break;
+                               // 11.5c กรอกยอดเงิน — ดึงจาก span.totalAmount ตัวที่ 2 ("ชำระด้วยเงินรวม")
+                               // index 0 = ปรับปรุงรวม, index 1 = ชำระด้วยเงินรวม, index 2 = ภาษีหัก ณ ที่จ่าย
+                               const totalAmountSpan = page.locator('span.totalAmount').nth(1);
+                               let amountStr = '';
+                               try {
+                                   await totalAmountSpan.waitFor({ state: 'visible', timeout: 5000 });
+                                   const rawAmount = await totalAmountSpan.innerText();
+                                   // "5,478.57 บาท" → "5478.57"
+                                   amountStr = rawAmount.replace(/,/g, '').replace(/[^\d.]/g, '').trim();
+                                   addLog(job.id, "info", `[PAY] ดึงยอดจากหน้าเว็บ: ${rawAmount.trim()} → ${amountStr}`);
+                               } catch (e) {
+                                   addLog(job.id, "warn", `[PAY] ⚠️ หา span.totalAmount ไม่เจอ`);
+                               }
+                               
+                               if (amountStr && parseFloat(amountStr) > 0) {
+                                   addLog(job.id, "info", `[PAY] กรอกจำนวนเงิน: ${amountStr}...`);
+                                   
+                                   // หา input "จำนวนเงินที่ปรับปรุง" ใน Modal
+                                   // ใช้ CSS :has() หา container ที่มี label ตรง แล้วคลิก container ก่อน
+                                   const amountContainer = paymentModal.locator('div.input:has(label[title="จำนวนเงินที่ปรับปรุง"])').first();
+                                   await amountContainer.scrollIntoViewIfNeeded();
+                                   await amountContainer.click({ force: true });
+                                   await page.waitForTimeout(300);
+                                   
+                                   // กรอกยอดเงิน
+                                   const amountInput = amountContainer.locator('input[type="text"]').first();
+                                   await amountInput.click({ force: true });
+                                   await page.waitForTimeout(200);
+                                   await amountInput.press('Control+a');
+                                   await amountInput.press('Backspace');
+                                   await amountInput.fill(amountStr);
+                                   await amountInput.press('Tab');
+                                   await page.waitForTimeout(500);
+                                   addLog(job.id, "success", `[PAY] กรอกจำนวนเงิน: ${amountStr} สำเร็จ`);
+                               } else {
+                                   addLog(job.id, "warn", `[PAY] ⚠️ ไม่พบยอด "ยอดหลังบวกภาษีมูลค่าเพิ่ม" ใน Excel`);
+                               }
+
+                           } else {
+                               // ═══════════════════════════════════════════
+                               // 🔤 โค้ดเป็นตัวอักษร (เช่น CSH001)
+                               // → กรอกช่อง "ชำระโดย" (ช่องทางการเงิน)
+                               // ═══════════════════════════════════════════
+                               
+                               addLog(job.id, "info", `[PAY] กรอกโค้ดชำระเงิน: ${payCode}...`);
+                               
+                               // หา input "ชำระโดย" จาก placeholder ภายใน Modal
+                               let payInput = null;
+                               const payInputSelectors = [
+                                   paymentModal.locator('input[placeholder="กรุณาระบุช่องทางการเงิน"]').first(),
+                                   paymentModal.locator('#DropdownPaymentBankAccount input.textSelectedDropdown').first(),
+                                   paymentModal.locator('input.textSelectedDropdown').first(),
+                               ];
+                               for (const sel of payInputSelectors) {
+                                   try {
+                                       if (await sel.isVisible({ timeout: 3000 })) {
+                                           payInput = sel;
+                                           break;
+                                       }
+                                   } catch (e) {}
+                               }
+                               
+                               // Fallback: คลิก selectInputDropdown area
+                               if (!payInput) {
+                                   const dropdownArea = paymentModal.locator('.selectInputDropdown').first();
+                                   await dropdownArea.click({ force: true });
+                                   await page.waitForTimeout(500);
+                                   payInput = paymentModal.locator('input[placeholder="กรุณาระบุช่องทางการเงิน"]').first();
+                               }
+                               
+                               await payInput.scrollIntoViewIfNeeded();
+                               await payInput.click({ force: true });
+                               await page.waitForTimeout(300);
+                               
+                               await payInput.press('Control+a');
+                               await payInput.press('Backspace');
+                               await page.waitForTimeout(100);
+                               await payInput.fill(payCode);
+                               await page.waitForTimeout(1500);
+
+                               // เลือกจาก Dropdown
+                               let isSelected = false;
+                               try {
+                                   const allOpts = paymentModal.locator('.dropdown .product, .dropdown .optionBank, .dropdown li').filter({ hasText: new RegExp(payCode, 'i') });
+                                   if (await allOpts.count() > 0) {
+                                       await allOpts.first().click({ force: true });
+                                       isSelected = true;
+                                       addLog(job.id, "success", `[PAY] เลือกช่องทางชำระ: ${payCode} สำเร็จ`);
+                                   }
+                               } catch (e) {}
+                               
+                               if (!isSelected) {
+                                   await payInput.press('Enter');
+                                   await page.waitForTimeout(500);
+                                   addLog(job.id, "info", `[PAY] กด Enter เพื่อเลือกรายการแรกใน Dropdown`);
                                }
                            }
-                           if (!isSelected && optCount > 0) {
-                               await ddOptions.first().click({ force: true });
-                               isSelected = true;
-                           }
-                           await page.waitForTimeout(500);
+                           await page.waitForTimeout(200);
 
-                           // 11.5 Confirm payment
-                           const confirmBtn = paymentModal.locator('button', { hasText: 'ชำระเงิน' }).first();
+                           // 11.7 คลิกปุ่ม "ชำระเงิน" ใน Modal (footer)
+                           addLog(job.id, "info", `[PAY] คลิกปุ่ม 'ชำระเงิน' เพื่อยืนยัน...`);
+                           const confirmBtn = paymentModal.locator('div.mint.textblack button', { hasText: 'ชำระเงิน' }).first();
                            await confirmBtn.waitFor({ state: 'visible', timeout: 5000 });
                            await confirmBtn.click({ force: true });
-                           await page.waitForTimeout(5000);
-                           addLog(job.id, "success", `[PAY] Payment complete! (code: ${payCode})`);
+                           await page.waitForTimeout(2000);
+                           addLog(job.id, "success", `[PAY] ✅ ชำระเงินสำเร็จ! (code: ${payCode})`);
 
                        } catch (payModalErr) {
-                           addLog(job.id, "warn", `[PAY] Error during payment: ${payModalErr.message}`);
+                           addLog(job.id, "warn", `[PAY] ❌ เกิดข้อผิดพลาดขณะชำระเงิน: ${payModalErr.message}`);
                        }
                    }
                   

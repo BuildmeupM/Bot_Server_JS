@@ -56,6 +56,14 @@
 - ใช้ `peakCode` ไปที่ `https://secure.peakaccount.com/home?emi={peakCode}`
 - ถ้าไม่มี `peakCode` → ❌ หยุดทำงานทันที
 
+### 2.5 ตรวจสอบสิทธิ์ผู้ใช้
+
+- ไปที่ `https://secure.peakaccount.com/setting/userSetting?emi={peakCode}&reload=1`
+- อ่านตาราง "ผู้ใช้งานในระบบ" จาก `#customTable .TabelBody table tr td p.crop`
+- ค้นหาชื่อ **Kanokwan somsri** ในรายชื่อ
+- ถ้าพบ → ✅ ผ่านการตรวจสอบ ทำงานต่อ
+- ถ้าไม่พบ → ❌ หยุดทำงานทันที (throw Error)
+
 ---
 
 ## ขั้นตอนที่ 3: ค้นหาและเลือกผู้ขาย (Vendor)

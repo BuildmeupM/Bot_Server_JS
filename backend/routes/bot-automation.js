@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const { getDB } = require("../database");
+const { getPool } = require("../mysql");
 const crypto = require("crypto");
 
 const ENCRYPTION_KEY =
@@ -227,10 +228,33 @@ async function parseExcelData(excelPath, jobId) {
           addLog(jobId, "warn", `⚠️ ข้ามรายการทั้งหมด ${skippedCount} รายการ (ข้อมูลไม่ครบ) เหลือ ${validTransactions.length} รายการที่พร้อมทำงาน`);
         }
 
+        // --- Validation: ตรวจสอบไฟล์ต้นทางว่ามีอยู่จริงหรือไม่ ---
+        const excelDir = path.dirname(filePath);
+        let missingFiles = [];
+        for (const tx of validTransactions) {
+          const oldFile = flexFind(tx, 'ชื่อไฟล์เก่า');
+          if (oldFile && String(oldFile).trim()) {
+            const srcPath = path.join(excelDir, String(oldFile).trim());
+            if (!fs.existsSync(srcPath)) {
+              const rowNum = flexFind(tx, 'ลำดับ') || '?';
+              missingFiles.push({ row: rowNum, file: String(oldFile).trim() });
+            }
+          }
+        }
+
+        if (missingFiles.length > 0) {
+          addLog(jobId, "error", `❌ พบ ${missingFiles.length} ไฟล์ต้นทางที่ไม่มีอยู่ในโฟลเดอร์:`);
+          for (const mf of missingFiles) {
+            addLog(jobId, "error", `   ❌ แถว ${mf.row}: ${mf.file}`);
+          }
+          addLog(jobId, "error", `📁 โฟลเดอร์: ${excelDir}`);
+        }
+
         resolve({
           transactions: validTransactions,
           vendors: vendors,
           skippedCount: skippedCount,
+          missingFiles: missingFiles,
         });
       } catch (innerE) {
         reject(innerE);
@@ -287,6 +311,14 @@ async function executeJob(job) {
       // ถ้ามีรายการถูกข้าม (ข้อมูลไม่ครบ) → หยุดทันที ไม่เข้า Login
       if (excelData.skippedCount > 0) {
         addLog(job.id, "error", `❌ พบ ${excelData.skippedCount} รายการที่ข้อมูลไม่ครบ — กรุณาแก้ไข Excel แล้วลองใหม่ (ระบบหยุดก่อน Login)`);
+        job.status = "error";
+        job.finishedAt = new Date().toISOString();
+        return;
+      }
+
+      // ถ้ามีไฟล์ต้นทางหายไป → หยุดทันที ไม่เข้า Login
+      if (excelData.missingFiles && excelData.missingFiles.length > 0) {
+        addLog(job.id, "error", `❌ พบ ${excelData.missingFiles.length} ไฟล์ต้นทางที่ไม่มีอยู่จริง — กรุณาเช็คไฟล์แล้วลองใหม่ (ระบบหยุดก่อน Login)`);
         job.status = "error";
         job.finishedAt = new Date().toISOString();
         return;
@@ -364,12 +396,15 @@ async function executeJob(job) {
     addLog(job.id, "info", `📧 กรอกอีเมล: ${job.username}`);
     await emailInput.fill(job.username);
 
-    // Decrypt password
-    const db = getDB();
-    const profile = db
-      .prepare("SELECT password FROM bot_profiles WHERE id = ?")
-      .get(job.profileId);
-    const password = decrypt(profile.password);
+    // Decrypt password (from MySQL)
+    const pool = getPool();
+    const [profileRows] = await pool.execute("SELECT password FROM bot_profiles WHERE id = ?", [job.profileId]);
+    const profileData = profileRows[0];
+    if (!profileData) {
+      addLog(job.id, "error", `❌ ไม่พบ Profile ID: ${job.profileId} ใน Database`);
+      throw new Error("Profile not found in MySQL");
+    }
+    const password = decrypt(profileData.password);
 
     addLog(job.id, "info", "🔒 กรอกรหัสผ่าน: ********");
     await page.fill("input[placeholder='กรุณากรอกข้อมูลรหัสผ่าน']", password);
@@ -388,10 +423,11 @@ async function executeJob(job) {
         job.status = "logged_in";
         addLog(job.id, "success", `✅ Login สำเร็จ! (${currentUrl})`);
 
-        // Update DB status
-        db.prepare(
+        // Update DB status (MySQL)
+        await pool.execute(
           "UPDATE bot_profiles SET status = ?, last_sync = ? WHERE id = ?",
-        ).run("running", new Date().toISOString(), job.profileId);
+          ["running", new Date().toISOString(), job.profileId]
+        );
       } else {
         job.status = "logged_in";
         addLog(job.id, "warn", `⚠️ Login อาจไม่สำเร็จ — URL: ${currentUrl}`);
@@ -419,7 +455,42 @@ async function executeJob(job) {
       });
       addLog(job.id, "success", "✅ เข้าหน้าหลักบริษัทสำเร็จ");
 
-      await page.waitForTimeout(500); // Reduced from 1500ms to 500ms
+      await page.waitForTimeout(500);
+
+      // 7.5 ตรวจสอบสิทธิ์ผู้ใช้ — เข้าหน้า User Settings เพื่อเช็คว่ามี Kanokwan somsri อยู่ในระบบ
+      addLog(job.id, "info", "🔑 กำลังตรวจสอบสิทธิ์ผู้ใช้ในระบบ...");
+      try {
+        await page.goto(
+          `https://secure.peakaccount.com/setting/userSetting?emi=${peakCode}&reload=1`,
+          { waitUntil: "domcontentloaded", timeout: 30000 }
+        );
+        await page.waitForTimeout(3000); // รอตารางโหลด
+
+        // อ่านชื่อผู้ใช้ทั้งหมดจากตาราง
+        const userNames = await page.evaluate(() => {
+          const cells = document.querySelectorAll("#customTable .TabelBody table tr td p.crop");
+          return Array.from(cells).map(el => el.textContent.trim());
+        });
+
+        addLog(job.id, "info", `📋 พบผู้ใช้ในระบบ ${userNames.length} คน: ${userNames.join(", ")}`);
+
+        const requiredUser = "Kanokwan somsri";
+        const found = userNames.some(
+          name => name.toLowerCase() === requiredUser.toLowerCase()
+        );
+
+        if (found) {
+          addLog(job.id, "success", `✅ พบ ${requiredUser} เป็นผู้ดูแลระบบ — ผ่านการตรวจสอบ`);
+        } else {
+          addLog(job.id, "error", `❌ ไม่พบ ${requiredUser} ในรายชื่อผู้ใช้ — หยุดการทำงาน`);
+          throw new Error(`Permission check failed: ${requiredUser} not found in user settings`);
+        }
+      } catch (permErr) {
+        if (permErr.message.includes("Permission check failed")) {
+          throw permErr; // หยุดทำงานจริง
+        }
+        addLog(job.id, "warn", `⚠️ ตรวจสอบสิทธิ์ไม่สำเร็จ: ${permErr.message} — ทำงานต่อ`);
+      }
 
       // 8. Navigate to Expense Entry Page
       addLog(job.id, "info", '📝 กำลังไปที่หน้า "บันทึกบัญชีค่าใช้จ่าย"...');
@@ -1665,247 +1736,92 @@ async function executeJob(job) {
               }
           }
 
-          // --- 7. เลือกรูปแบบการชำระเงิน "ขั้นสูง" ---
-          addLog(job.id, "info", `⚙️ กำลังเลือกรูปแบบชำระเงิน 'ขั้นสูง'...`);
-          try {
-              // บังคับเลื่อนหน้าจอลงมาล่างสุดก่อนเลย เพื่อให้เปิดมุมมองเห็นปุ่มชำระเงิน
-              await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-              await page.waitForTimeout(500); // รอให้หน้าจอเลื่อนเสร็จ
-
-              const advancedLabel = page.locator('label', { hasText: new RegExp('^\\s*ขั้นสูง\\s*$', 'i') }).first();
-              if (await advancedLabel.isVisible({ timeout: 2000 })) {
-                  await advancedLabel.scrollIntoViewIfNeeded(); // ทำซ้ำอีกชั้นกันเหนียวเผื่ออยู่ใน Element ซ้อน
-                  await page.waitForTimeout(300); // รอให้ scroll นิ่ง
-                  await advancedLabel.click({ force: true });
-                  await page.waitForTimeout(500); // รอให้ dropdown หรือส่วนชำระเงินเปิดออก
-                  addLog(job.id, "success", `✅ เลือกรูปแบบการชำระเงิน 'ขั้นสูง' สำเร็จ`);
-              } else {
-                  addLog(job.id, "warn", `⚠️ ไม่พบปุ่ม 'ขั้นสูง' ในหน้าจอ`);
-              }
-          } catch (advErr) {
-              addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะคลิกปุ่ม 'ขั้นสูง': ${advErr.message}`);
-          }
-
-          // --- 8. เลือกช่องทางการเงิน (Payment Bank Account) ---
+          // --- 7. ชำระเงิน: ทุกกรณีเลือก "ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)" ---
+          // เก็บโค้ดชำระเงินจาก Excel ไว้ใช้หลังอนุมัติ + ตรวจ VAT + จัดการไฟล์
           const getExcelValOuter = (tx, keyword) => {
               const ObjectKeys = Object.keys(tx);
               const matchedKey = ObjectKeys.find(k => k.replace(/[\n\r\s]/g, '').includes(keyword));
               return matchedKey ? tx[matchedKey] : undefined;
           };
-          
           const payCodeStr = getExcelValOuter(primaryTx, "โค้ดตัดชำระเงิน");
-          
-          if (!payCodeStr || String(payCodeStr).trim() === "") {
-                // กรณีเป็นค่าว่าง ให้คลิก "ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)"
-                addLog(job.id, "info", `💳 โค้ดตัดชำระเงินว่างเปล่า กำลังเลือก 'ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)'...`);
-                try {
-                    const unpaidLabel = page.locator('div.cursorPointer p.textBlue', { hasText: 'ยังไม่ชำระเงิน' }).first();
-                    if (await unpaidLabel.isVisible({ timeout: 2000 })) {
-                        await unpaidLabel.scrollIntoViewIfNeeded();
-                        await unpaidLabel.click({ force: true });
-                        await page.waitForTimeout(500);
-                        addLog(job.id, "success", `✅ เลือก 'ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)' สำเร็จ`);
-                    } else {
-                        addLog(job.id, "warn", `⚠️ ไม่พบปุ่ม 'ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)'`);
-                    }
-                } catch (unpaidErr) {
-                    addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะระบุยังไม่ชำระเงิน: ${unpaidErr.message}`);
-                }
-          } else {
-              const payCode = String(payCodeStr).trim();
-              
-              // เช็คว่ามีเฉพาะตัวเลขหรือไม่ (รวมถึงอาจมี - หรือเว้นวรรคได้ แต่ไม่มีตัวอักษรภาษาอังกฤษ/ไทย)
-              const isOnlyDigits = /^\d+$/.test(payCode.replace(/\s|-/g, ''));
-              
-              if (isOnlyDigits) {
-                  addLog(job.id, "info", `💳 โค้ดตัดชำระเงินเป็นตัวเลข (${payCode}) กำลังเลือกลง 'ค่าธรรมเนียม หรือรายการปรับปรุง'...`);
-                  try {
-                      const feeCheckboxLabel = page.locator('label', { hasText: new RegExp('^\\s*ค่าธรรมเนียม หรือรายการปรับปรุง\\s*$', 'i') }).first();
-                      if (await feeCheckboxLabel.isVisible({ timeout: 2000 })) {
-                          await feeCheckboxLabel.scrollIntoViewIfNeeded();
-                          await page.waitForTimeout(300);
-                          
-                          // เช็คให้ชัวร์ว่าติ๊กไปแล้วหรือยัง (ผ่านกล่อง input ที่คู่กัน)
-                          const feeCheckboxContainer = page.locator('div.d-flex.align-items-end').locator('xpath=..').locator('input[type="checkbox"][id^="ค่าธรรมเนียม"]').first();
-                          const isChecked = await feeCheckboxContainer.isChecked().catch(() => false);
-                          if (!isChecked) {
-                              await feeCheckboxLabel.click({ force: true });
-                              await page.waitForTimeout(500); // รอให้กล่องค้นหารหัสบัญชีแสดงขึ้นมา
-                          }
 
-                          // หากล่อง dropdown สำหรับใส่รหัสบัญชีของค่าธรรมเนียม
-                          // DOM ของระบบจะระบุ id="DropdownPaymentChartOfAccount" หรือมีป้าย "ปรับปรุงด้วยบัญชี"
-                          const targetDropdown = page.locator('#DropdownPaymentChartOfAccount div.multiselect').last();
-                          
-                          if (await targetDropdown.isVisible({ timeout: 2000 })) {
-                              await targetDropdown.scrollIntoViewIfNeeded();
-                              
-                              // 1. คลิกที่กล่องครอบก่อนเพื่อเปิด Dropdown และทำให้ input โผล่มา
-                              const targetTags = targetDropdown.locator('.multiselect__tags');
-                              await targetTags.click({ force: true });
-                              await page.waitForTimeout(300);
-                              
-                              // 2. เจอเคส Input ต้องโดน Focus ก่อนพิมพ์ -> บังคับหน้าจอให้คลิกที่ Input กล่องนี้
-                              const targetInput = targetDropdown.locator('input.multiselect__input');
-                              await targetInput.click({ force: true }); 
-                              await targetInput.fill("");
-                              await targetInput.pressSequentially(payCode, { delay: 10 });
-                              
-                              // รอช่อง Dropdown เด้งขึ้นมาให้เลือก
-                              const feeDropdownEl = targetDropdown; // ใช้ targetDropdown เดิม
-                              try {
-                                  await feeDropdownEl.locator('ul.multiselect__content li.multiselect__element').first().waitFor({ state: 'visible', timeout: 2500 });
-                              } catch (e) {}
-                              await page.waitForTimeout(300);
-                              
-                              const allFeeOptions = feeDropdownEl.locator('ul.multiselect__content li.multiselect__element');
-                              const optCount = await allFeeOptions.count();
-                              
-                              let isSelected = false;
-                              for (let i = 0; i < optCount; i++) {
-                                  const optLabel = await allFeeOptions.nth(i).innerText();
-                                  if (optLabel && optLabel.replace(/[\n\r]/g, ' ').includes(payCode)) {
-                                      await allFeeOptions.nth(i).click({ force: true });
-                                      addLog(job.id, "success", `✅ เลือกค่าธรรมเนียม/รายการปรับปรุง '${optLabel.replace(/[\n\r]/g, ' ').trim()}' สำเร็จ`);
-                                      isSelected = true;
-                                      break;
-                                  }
-                              }
-                              
-                              if (!isSelected) {
-                                  addLog(job.id, "warn", `⚠️ ไม่พบรหัสบัญชีค่าธรรมเนียมที่ตรงกับ '${payCode}' ใน dropdown`);
-                                  await page.keyboard.press('Escape');
-                              }
-                          } else {
-                              addLog(job.id, "warn", `⚠️ ไม่พบช่องกรอกรหัสบัญชีสำหรับค่าธรรมเนียม (multiselect__input)`);
-                          }
-                      } else {
-                          addLog(job.id, "warn", `⚠️ ไม่พบปุ่ม 'ค่าธรรมเนียม หรือรายการปรับปรุง'`);
-                      }
-                  } catch (feeErr) {
-                      addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะระบุค่าธรรมเนียม: ${feeErr.message}`);
-                  }
+          addLog(job.id, "info", `💳 กำลังเลือก 'ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)'...`);
+
+          // ลบ: ส่วนเลือกช่องทางชำระเงินแบบเดิม (ย้ายไปทำหลัง VAT + File ops)
+          try {
+              await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+              await page.waitForTimeout(500);
+              
+              const unpaidLabel = page.locator('div.cursorPointer p.textBlue', { hasText: 'ยังไม่ชำระเงิน' }).first();
+              if (await unpaidLabel.isVisible({ timeout: 3000 })) {
+                  await unpaidLabel.scrollIntoViewIfNeeded();
+                  await unpaidLabel.click({ force: true });
+                  await page.waitForTimeout(500);
+                  addLog(job.id, "success", `✅ เลือก 'ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)' สำเร็จ`);
               } else {
-                  // เป็นชื่อภาษาอังกฤษ หรือตัวอักษร ให้กรอกในช่อง "กรุณาระบุช่องทางการเงิน" ตามปกติ
-                  addLog(job.id, "info", `💳 กำลังระบุช่องทางการเงิน: ${payCode}...`);
-                  try {
-                      // กล่อง Input: ภายใต้ #DropdownPaymentBankAccount หรือ input[placeholder="กรุณาระบุช่องทางการเงิน"]
-                      const payInput = page.locator('#DropdownPaymentBankAccount input, input[placeholder="กรุณาระบุช่องทางการเงิน"]').first();
-                      
-                      if (await payInput.isVisible({ timeout: 2000 })) {
-                          await payInput.scrollIntoViewIfNeeded();
-                          await payInput.click({ force: true });
-                          await payInput.fill("");
-                          await payInput.pressSequentially(payCode, { delay: 10 });
-                          
-                          // รอ API ค้นหาช่องทางชำระเงิน
-                          const payDropdown = page.locator('#DropdownPaymentBankAccount').first();
-                          try {
-                              await payDropdown.locator('.multiselect__element').first().waitFor({ state: 'visible', timeout: 2500 });
-                          } catch (e) {}
-                          
-                          await page.waitForTimeout(300); // ชะลอให้ DOM render นิ่ง
-                          const allPayOptions = payDropdown.locator('.multiselect__element');
-                          const optCount = await allPayOptions.count();
-                          
-                          let isSelected = false;
-                          for (let i = 0; i < optCount; i++) {
-                              const optLabel = await allPayOptions.nth(i).innerText();
-                              // เช็คว่ามี code ในข้อความของตัวเลือกนี้หรือไม่
-                              if (optLabel && optLabel.replace(/[\n\r]/g, ' ').includes(payCode)) {
-                                  await allPayOptions.nth(i).click({ force: true });
-                                  addLog(job.id, "success", `✅ เลือกช่องทางการเงิน '${optLabel.replace(/[\n\r]/g, ' ').trim()}' สำเร็จ`);
-                                  isSelected = true;
-                                  break;
-                              }
-                          }
-                          
-                          if (!isSelected) {
-                              addLog(job.id, "warn", `⚠️ ไม่พบช่องทางการเงินที่ตรงกับโค้ด '${payCode}' ในระบบ`);
-                              await page.keyboard.press('Escape');
-                          }
-                      } else {
-                          addLog(job.id, "warn", `⚠️ หาช่อง 'กรุณาระบุช่องทางการเงิน' ไม่พบ (อาจต้องตั้งค่าใน PEAK ก่อน)`);
-                      }
-                  } catch (payErr) {
-                      addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะระบุช่องทางการเงิน: ${payErr.message}`);
-                  }
+                  addLog(job.id, "warn", `⚠️ ไม่พบปุ่ม 'ยังไม่ชำระเงิน (ตั้งหนี้ไว้ก่อน)'`);
               }
+          } catch (unpaidErr) {
+              addLog(job.id, "warn", `⚠️ เกิดข้อผิดพลาดขณะระบุยังไม่ชำระเงิน: ${unpaidErr.message}`);
           }
           addLog(
             job.id,
             "success",
             `✅ จบขั้นตอนการกรอกข้อมูลหลักสำหรับบิลที่ ${groupIdx + 1} (เอกสาร ${primaryTx["เลขที่เอกสาร"]})`,
           );
-          
-          addLog(job.id, "info", "✅ กำลังดำเนินการบันทึก: คลิกปุ่ม 'อนุมัติบันทึกค่าใช้จ่าย'");
+                   
+                   // ดึงยอด VAT จากหน้าจอ
+          addLog(job.id, "info", "\u2705 \u0e01\u0e33\u0e25\u0e31\u0e07\u0e14\u0e33\u0e40\u0e19\u0e34\u0e19\u0e01\u0e32\u0e23\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01: \u0e04\u0e25\u0e34\u0e01\u0e1b\u0e38\u0e48\u0e21 '\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01\u0e04\u0e48\u0e32\u0e43\u0e0a\u0e49\u0e08\u0e48\u0e32\u0e22'");
           try {
-              const approveButton = page.locator('div.button.mint p', { hasText: /^อนุมัติบันทึกค่าใช้จ่าย$/ }).first();
+              const approveButton = page.locator('div.button.mint p', { hasText: /^\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01\u0e04\u0e48\u0e32\u0e43\u0e0a\u0e49\u0e08\u0e48\u0e32\u0e22$/ }).first();
               await approveButton.waitFor({ state: 'visible', timeout: 5000 });
               await approveButton.scrollIntoViewIfNeeded();
               await approveButton.click({ force: true });
-              addLog(job.id, "success", "✅ กดปุ่ม 'อนุมัติบันทึกค่าใช้จ่าย' เรียบร้อยแล้ว รอระบบประมวลผล...");
-              
-              // รอให้หน้าจอมีข้อความรหัสเอกสารใหม่ปรากฏขึ้นมา
+              addLog(job.id, "success", "\u2705 \u0e01\u0e14\u0e1b\u0e38\u0e48\u0e21 '\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e1a\u0e31\u0e19\u0e17\u0e36\u0e01\u0e04\u0e48\u0e32\u0e43\u0e0a\u0e49\u0e08\u0e48\u0e32\u0e22' \u0e40\u0e23\u0e35\u0e22\u0e1a\u0e23\u0e49\u0e2d\u0e22\u0e41\u0e25\u0e49\u0e27");
+
               try {
-                  // หา span ที่มีเลขเอกสาร (มักจะขึ้นต้นด้วย # หรืออยู่ใน span ตรงหัวกระดาษหลังจากบันทึกเสร็จ)
-                  // เนื่องจากโครงสร้างที่ให้มาคือ <span data-v-4a629f10="">#EXP-20260100001</span> 
-                  // เราจะหา span ที่มี text ขึ้นต้นด้วย # ตามด้วยตัวอักษรพิมพ์ใหญ่
                   const docIdElement = page.locator('span', { hasText: /^#[A-Z]+-\d+$/ }).first();
-                  await docIdElement.waitFor({ state: 'visible', timeout: 15000 }); // รอประมวลผลนานหน่อย
-                  
+                  await docIdElement.waitFor({ state: 'visible', timeout: 15000 });
+
                   const rawData = await docIdElement.innerText();
-                  // ลบเครื่องหมาย # ออก
                   const finalDocId = rawData.replace('#', '').trim();
-                  
-                  addLog(job.id, "success", `🎉 อนุมัติสำเร็จ! ได้รับเลขที่เอกสารใหม่: ${finalDocId}`);
-                  
-                  // --- ตรวจสอบยอดภาษีมูลค่าเพิ่ม (VAT) เทียบกับ Excel ---
-                  // หายอดภาษีรวมจากทุกรายการในบิลนี้
+
+                  addLog(job.id, "success", `\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e2a\u0e33\u0e40\u0e23\u0e47\u0e08! \u0e44\u0e14\u0e49\u0e23\u0e31\u0e1a\u0e40\u0e25\u0e02\u0e17\u0e35\u0e48\u0e40\u0e2d\u0e01\u0e2a\u0e32\u0e23\u0e43\u0e2b\u0e21\u0e48: ${finalDocId}`);
+
                   let expectedVat = 0;
                   for (const row of docGroup) {
-                      const vStr = row["ยอดภาษีมูลค่าเพิ่ม"] || row["ภาษีมูลค่าเพิ่ม"] || "0";
+                      const vStr = row["\u0e22\u0e2d\u0e14\u0e20\u0e32\u0e29\u0e35\u0e21\u0e39\u0e25\u0e04\u0e48\u0e32\u0e40\u0e1e\u0e34\u0e48\u0e21"] || row["\u0e20\u0e32\u0e29\u0e35\u0e21\u0e39\u0e25\u0e04\u0e48\u0e32\u0e40\u0e1e\u0e34\u0e48\u0e21"] || "0";
                       expectedVat += parseFloat(String(vStr).replace(/,/g, '')) || 0;
                   }
-                  
-                  // ดึงยอด VAT จากหน้าจอ ด้วยการอ่าน text รวมจาก body ให้มีความแม่นยำสูง ไม่ยึดติดกับโครงสร้าง div
+
                   let actualVat = 0;
-                  try {
-                      actualVat = await page.evaluate(() => {
-                          const bodyText = document.body.innerText;
-                          const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-                          // หาบรรทัดที่มีคำว่า ภาษีมูลค่าเพิ่ม จากล่างขึ้นบน
-                          for (let i = lines.length - 1; i >= 0; i--) {
-                              if (lines[i].includes('ภาษีมูลค่าเพิ่ม') && !lines[i].includes('รอคำนวณ')) {
-                                  const matches = lines[i].replace(/,/g, '').match(/[\d.]+/g);
-                                  if (matches && matches.length > 0) {
-                                      let val = parseFloat(matches[matches.length - 1]);
-                                      // ถ้าตัวเลขคือ 7 (จากคำว่า 7%) ให้สลับไปเอาตัวก่อนหน้า หรือหาบรรทัดล่างถัดไป
-                                      if (val === 7 && lines[i].includes('7%')) {
-                                          if (matches.length > 1) {
-                                              val = parseFloat(matches[matches.length - 2]);
-                                          } else if (i + 1 < lines.length) {
-                                              const nextMatches = lines[i + 1].replace(/,/g, '').match(/[\d.]+/g);
-                                              if (nextMatches && nextMatches.length > 0) {
-                                                  val = parseFloat(nextMatches[0]);
-                                              } else {
-                                                  val = 0;
-                                              }
-                                          } else {
-                                              val = 0;
-                                          }
-                                      }
-                                      return val;
-                                  } else if (i + 1 < lines.length) {
-                                      // ถ้าเลขไปตกอยู่บรรทัดถัดไป
-                                      const nextMatches = lines[i + 1].replace(/,/g, '').match(/[\d.]+/g);
-                                      if (nextMatches && nextMatches.length > 0) return parseFloat(nextMatches[0]);
-                                  }
-                              }
-                          }
-                          return 0;
-                      });
-                  } catch (vErr) {
+                   try {
+                       actualVat = await page.evaluate(() => {
+                           const bodyText = document.body.innerText;
+                           const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+                           for (let i = lines.length - 1; i >= 0; i--) {
+                               if (lines[i].includes('\u0e20\u0e32\u0e29\u0e35\u0e21\u0e39\u0e25\u0e04\u0e48\u0e32\u0e40\u0e1e\u0e34\u0e48\u0e21') && !lines[i].includes('\u0e23\u0e2d\u0e04\u0e33\u0e19\u0e27\u0e13')) {
+                                   const matches = lines[i].replace(/,/g, '').match(/[\d.]+/g);
+                                   if (matches && matches.length > 0) {
+                                       let val = parseFloat(matches[matches.length - 1]);
+                                       if (val === 7 && lines[i].includes('7%')) {
+                                           if (matches.length > 1) {
+                                               val = parseFloat(matches[matches.length - 2]);
+                                           } else if (i + 1 < lines.length) {
+                                               const nm = lines[i + 1].replace(/,/g, '').match(/[\d.]+/g);
+                                               val = (nm && nm.length > 0) ? parseFloat(nm[0]) : 0;
+                                           } else { val = 0; }
+                                       }
+                                       return val;
+                                   } else if (i + 1 < lines.length) {
+                                       const nm2 = lines[i + 1].replace(/,/g, '').match(/[\d.]+/g);
+                                       if (nm2 && nm2.length > 0) return parseFloat(nm2[0]);
+                                   }
+                               }
+                           }
+                           return 0;
+                       });
+                   } catch (vErr) {
                       addLog(job.id, "warn", `⚠️ ไม่สามารถดึงยอดภาษีจากหน้าเว็บเพื่อตรวจสอบได้: ${vErr.message}`);
                   }
                   
@@ -1915,6 +1831,20 @@ async function executeJob(job) {
                       addLog(job.id, "info", `🔄 กำลังเข้าสู่โหมดแก้ไขเอกสาร...`);
                       
                       try {
+                          // ตรวจสอบว่า page ยังเปิดอยู่ก่อนเข้าโหมดแก้ไข
+                          if (page.isClosed()) {
+                              addLog(job.id, "warn", "⚠️ Page ถูกปิดแล้ว — ไม่สามารถแก้ไข VAT ได้");
+                              // เปิดหน้าใหม่จาก context เดิม
+                              page = await job.context.newPage();
+                              job.page = page;
+                              addLog(job.id, "info", "🔄 เปิดหน้าใหม่จาก context เดิม");
+                              // กลับไปหน้าเอกสารที่เพิ่งสร้าง
+                              await page.goto(`https://secure.peakaccount.com/expense/purchaseInventory/${finalDocId}?emi=${job.peakCode}`, {
+                                  waitUntil: 'domcontentloaded', timeout: 30000
+                              });
+                              await page.waitForTimeout(3000);
+                          }
+
                           // คลิกปุ่ม "ตัวเลือก" (หลาย selector fallback)
                           let optionsClicked = false;
                           const optSelectors = [
@@ -1962,8 +1892,9 @@ async function executeJob(job) {
                           
                           addLog(job.id, "success", `✅ เข้าสู่หน้าแก้ไขเรียบร้อยแล้ว รอดำเนินการปรับปรุงภาษี...`);
                           
-                          // รอหน้าเว็บโหลดเสร็จแทนการหน่วงเวลาตายตัว 5 วิ
+                          // รอหน้าเว็บโหลดเสร็จ
                           await page.waitForLoadState('domcontentloaded');
+                          await page.waitForTimeout(3000); // เพิ่มเวลารอ PEAK render
                           
                           // เลื่อนลงล่างสุดเพื่อหาไอคอน "แก้ไขภาษี"
                           const editIcon = page.locator('i.fa-pen.cursor, #iconClick').last();
@@ -2185,6 +2116,101 @@ async function executeJob(job) {
                       addLog(job.id, 'warn', `⚠️ เกิดข้อผิดพลาดขณะเปลี่ยนชื่อไฟล์: ${renameErr.message}`);
                   }
                   
+                   // --- 11. Payment Modal ---
+                   if (payCodeStr && String(payCodeStr).trim() !== "") {
+                       const payCode = String(payCodeStr).trim();
+                       addLog(job.id, "info", `[PAY] Starting payment (code: ${payCode})...`);
+                       try {
+                           // Always reload doc page to ensure correct state after VAT/file steps
+                           if (page.isClosed()) {
+                               page = await job.context.newPage();
+                               job.page = page;
+                           }
+                           addLog(job.id, "info", `[PAY] Reloading doc page before payment...`);
+                           await page.goto(
+                               `https://secure.peakaccount.com/expense/purchaseInventory/${finalDocId}?emi=${job.peakCode}`,
+                               { waitUntil: 'domcontentloaded', timeout: 30000 }
+                           );
+                           await page.waitForTimeout(4000);
+                           addLog(job.id, "success", `[PAY] Doc loaded OK`);
+
+                           // 11.1 Click payment tab
+                           const paymentTab = page.locator('div.tap p', { hasText: 'ข้อมูลการชำระ' }).first();
+                           await paymentTab.waitFor({ state: 'visible', timeout: 15000 });
+                           await paymentTab.scrollIntoViewIfNeeded();
+                           await paymentTab.click({ force: true });
+                           await page.waitForTimeout(1500);
+
+                           // 11.2 Click pay button
+                           const payBtn = page.locator('div.mint.textblack button', { hasText: 'จ่ายชำระ' }).first();
+                           await payBtn.waitFor({ state: 'visible', timeout: 10000 });
+                           await payBtn.scrollIntoViewIfNeeded();
+                           await payBtn.click({ force: true });
+
+                           // 11.3 Wait for modal AND dropdown content to fully load
+                           const paymentModal = page.locator('div.modalBox').first();
+                           await paymentModal.waitFor({ state: 'visible', timeout: 15000 });
+                           await page.waitForSelector('#DropdownPaymentBankAccount', { state: 'visible', timeout: 15000 });
+                           addLog(job.id, "success", `[PAY] Modal content loaded`);
+
+                           // 11.4 Select payment channel via multiselect
+                           let payDropdownBox = null;
+                           const ddSelectors = [
+                               '#DropdownPaymentBankAccount div.multiselect',
+                               '#DropdownPaymentBankAccount .multiselect',
+                               '[id*="PaymentBankAccount"] div.multiselect',
+                               '[id*="PaymentBankAccount"] .multiselect',
+                           ];
+                           for (const sel of ddSelectors) {
+                               try {
+                                   const el = page.locator(sel).first();
+                                   await el.waitFor({ state: 'visible', timeout: 5000 });
+                                   payDropdownBox = el;
+                                   break;
+                               } catch (e) {}
+                           }
+                           if (!payDropdownBox) {
+                               throw new Error('[PAY] Cannot find #DropdownPaymentBankAccount in Modal');
+                           }
+                           await payDropdownBox.scrollIntoViewIfNeeded();
+                           await payDropdownBox.locator('.multiselect__tags').click({ force: true });
+                           await page.waitForTimeout(500);
+                           const payInput = payDropdownBox.locator('input.multiselect__input');
+                           await payInput.click({ force: true });
+                           await payInput.fill('');
+                           await payInput.pressSequentially(payCode, { delay: 30 });
+                           await page.waitForTimeout(1500);
+
+                           const ddOptions = payDropdownBox.locator('ul.multiselect__content li.multiselect__element');
+                           try { await ddOptions.first().waitFor({ state: 'visible', timeout: 3000 }); } catch (e) {}
+                           const optCount = await ddOptions.count();
+                           let isSelected = false;
+                           for (let i = 0; i < optCount; i++) {
+                               const label = await ddOptions.nth(i).innerText();
+                               if (label && label.replace(/[\n\r]/g, ' ').includes(payCode)) {
+                                   await ddOptions.nth(i).click({ force: true });
+                                   isSelected = true;
+                                   break;
+                               }
+                           }
+                           if (!isSelected && optCount > 0) {
+                               await ddOptions.first().click({ force: true });
+                               isSelected = true;
+                           }
+                           await page.waitForTimeout(500);
+
+                           // 11.5 Confirm payment
+                           const confirmBtn = paymentModal.locator('button', { hasText: 'ชำระเงิน' }).first();
+                           await confirmBtn.waitFor({ state: 'visible', timeout: 5000 });
+                           await confirmBtn.click({ force: true });
+                           await page.waitForTimeout(5000);
+                           addLog(job.id, "success", `[PAY] Payment complete! (code: ${payCode})`);
+
+                       } catch (payModalErr) {
+                           addLog(job.id, "warn", `[PAY] Error during payment: ${payModalErr.message}`);
+                       }
+                   }
+                  
               } catch (extractErr) {
                   addLog(job.id, "warn", `⚠️ ไม่สามารถดึงเลขที่เอกสารใหม่ได้ (อาจบันทึกสำเร็จแต่หา element ไม่เจอ): ${extractErr.message}`);
               }
@@ -2330,10 +2356,9 @@ router.post("/start", async (req, res) => {
   if (!profileId) return res.status(400).json({ error: "Missing profileId" });
 
   try {
-    const db = getDB();
-    const profile = db
-      .prepare("SELECT * FROM bot_profiles WHERE id = ?")
-      .get(profileId);
+    const pool = getPool();
+    const [profileRows] = await pool.execute("SELECT * FROM bot_profiles WHERE id = ?", [profileId]);
+    const profile = profileRows[0];
     if (!profile) return res.status(404).json({ error: "Profile not found" });
 
     const job = createJob(profileId, profile, excelPath);
@@ -2485,13 +2510,13 @@ router.post("/stop/:jobId", async (req, res) => {
   job.finishedAt = new Date().toISOString();
   addLog(jobId, "warn", "⏹️ บอทถูกหยุดโดยผู้ใช้");
 
-  // Update profile status
+  // Update profile status (MySQL)
   try {
-    const db = getDB();
-    db.prepare("UPDATE bot_profiles SET status = ? WHERE id = ?").run(
+    const pool = getPool();
+    await pool.execute("UPDATE bot_profiles SET status = ? WHERE id = ?", [
       "idle",
       job.profileId,
-    );
+    ]);
   } catch (e) {}
 
   // Process next in queue

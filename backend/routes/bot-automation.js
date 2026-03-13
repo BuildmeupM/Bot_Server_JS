@@ -1872,7 +1872,7 @@ async function executeJob(job) {
                   }
                   
                   // เทียบยอด (ใช้ Math.abs เพื่อป้องกันปัญหาทศนิยมปัดเศษ)
-                  if (Math.abs(expectedVat - actualVat) > 0.05) {
+                  if (expectedVat !== actualVat) {
                       addLog(job.id, "warn", `⚠️ ยอดภาษีมูลค่าเพิ่มไม่ตรงกัน! (Excel: ${expectedVat}, หน้าเว็บ: ${actualVat})`);
                       addLog(job.id, "info", `🔄 กำลังเข้าสู่โหมดแก้ไขเอกสาร...`);
                       
@@ -2210,6 +2210,39 @@ async function executeJob(job) {
                            await page.waitForTimeout(200);
                            addLog(job.id, "success", `[PAY] เลือก 'ขั้นสูง' สำเร็จ`);
 
+
+                           // 11.4.5 กรอกวันที่ชำระ (ใช้วันที่เดียวกับวันที่ออกของบิล)
+                           const payDateRaw = primaryTx['วันที่'];
+                           if (payDateRaw) {
+                               let payDateStr = String(payDateRaw).trim();
+                               // แปลง format ให้เป็น DD/MM/YYYY
+                               if (!isNaN(payDateStr) && Number(payDateStr) >= 20000) {
+                                   const d = new Date(Math.round((Number(payDateStr) - 25569) * 86400 * 1000));
+                                   const day = String(d.getDate()).padStart(2, '0');
+                                   const mon = String(d.getMonth() + 1).padStart(2, '0');
+                                   const yr = String(d.getFullYear());
+                                   payDateStr = `${day}/${mon}/${yr}`;
+                               } else if (payDateStr.includes('-')) {
+                                   const parts = payDateStr.split('-');
+                                   if (parts.length === 3) payDateStr = `${parts[2]}/${parts[1]}/${parts[0]}`;
+                               }
+                               addLog(job.id, "info", `[PAY] กรอกวันที่ชำระ: ${payDateStr}...`);
+                               try {
+                                   const payDateInput = paymentModal.locator('input[name="วันที่ชำระ"]').first();
+                                   await payDateInput.waitFor({ state: 'visible', timeout: 5000 });
+                                   await payDateInput.click();
+                                   await payDateInput.press('Control+a');
+                                   await payDateInput.press('Backspace');
+                                   await payDateInput.pressSequentially(payDateStr, { delay: 10 });
+                                   await payDateInput.press('Enter');
+                                   await page.waitForTimeout(300);
+                                   addLog(job.id, "success", `[PAY] กรอกวันที่ชำระ: ${payDateStr} สำเร็จ`);
+                               } catch (payDateErr) {
+                                   addLog(job.id, "warn", `[PAY] ⚠️ ไม่สามารถกรอกวันที่ชำระได้: ${payDateErr.message}`);
+                               }
+                           } else {
+                               addLog(job.id, "info", `[PAY] ไม่มีข้อมูลวันที่ใน Excel — ใช้วันที่ตั้งต้นของระบบ`);
+                           }
                            // 11.5 แยกเงื่อนไข: ตัวเลข vs ตัวอักษร
                            const isNumericCode = /^\d+$/.test(payCode);
                            addLog(job.id, "info", `[PAY] โค้ด "${payCode}" เป็น${isNumericCode ? 'ตัวเลข → ค่าธรรมเนียม' : 'ตัวอักษร → ช่องทางการเงิน'}`);

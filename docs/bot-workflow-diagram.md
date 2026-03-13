@@ -114,7 +114,8 @@ flowchart TD
     PAY1["📋 11. คลิก tab 'ข้อมูลการชำระ'"] --> PAY2["💰 คลิกปุ่ม 'จ่ายชำระ'"]
     PAY2 --> PAY3["⏳ รอ Modal ชำระเงิน"]
     PAY3 --> PAY3A["🔘 เลือก 'ขั้นสูง'"]
-    PAY3A --> PAY_TYPE{"โค้ดชำระเป็นตัวเลข<br/>หรือตัวอักษร?"}
+    PAY3A --> PAY_DATE["📅 กรอกวันที่ชำระ<br/>จาก Excel คอลัมน์ 'วันที่'<br/>format DD/MM/YYYY"]
+    PAY_DATE --> PAY_TYPE{"โค้ดชำระเป็นตัวเลข<br/>หรือตัวอักษร?"}
 
     PAY_TYPE -- "🔢 ตัวเลข เช่น 212201" --> PAY_NUM1["☑️ ติ๊ก 'ค่าธรรมเนียม'"]
     PAY_NUM1 --> PAY_NUM2["🔍 คลิก p.textBlue.crop<br/>เปิด multiselect ค่าธรรมเนียม<br/>พิมพ์รหัสบัญชี → เลือก"]
@@ -157,6 +158,7 @@ flowchart TD
     style PAY_TYPE_NOTE fill:#1e293b,color:#94a3b8,stroke:#334155,stroke-dasharray:5
     style PAY1 fill:#8b5cf6,color:#fff,stroke:none
     style PAY3A fill:#6366f1,color:#fff,stroke:none
+    style PAY_DATE fill:#0ea5e9,color:#fff,stroke:none
     style PAY_TYPE fill:#f59e0b,color:#000,stroke:none
     style PAY_NUM1 fill:#06b6d4,color:#fff,stroke:none
     style PAY_NUM2 fill:#06b6d4,color:#fff,stroke:none

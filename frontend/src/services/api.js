@@ -5,21 +5,39 @@ const api = axios.create({
     timeout: 300000, // 5min for large files
 });
 
-// Attach JWT token to every request
+// Attach JWT token from localStorage to every request
 api.interceptors.request.use((config) => {
-    config.headers.Authorization = `Bearer bypass`;
+    const token = localStorage.getItem('token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
     return config;
 });
 
-// Handle 401 responses
+// Handle 401 responses — redirect to login
 api.interceptors.response.use(
     (response) => response,
     (error) => {
+        if (error.response?.status === 401) {
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+            // Only redirect if not already on login page
+            if (!window.location.pathname.includes('/login')) {
+                window.location.href = '/login';
+            }
+        }
         return Promise.reject(error);
     }
 );
 
-// Auth bypassed
+// Auth
+export const login = (username, password) => api.post('/auth/login', { username, password });
+export const getMe = () => api.get('/auth/me');
+export const logout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    window.location.href = '/login';
+};
 
 // Files
 export const browseDirectory = (dirPath) => api.post('/files/browse', { dirPath });
@@ -35,7 +53,8 @@ export const unlockPdf = (data) => api.post('/pdf/unlock', data);
 
 // Get preview URL
 export const getPreviewUrl = (filePath) => {
-    return `/api/files/preview?path=${encodeURIComponent(filePath)}&token=bypass`;
+    const token = localStorage.getItem('token');
+    return `/api/files/preview?path=${encodeURIComponent(filePath)}&token=${token}`;
 };
 
 // Tools

@@ -689,7 +689,7 @@ router.post('/process', upload.single('file'), async (req, res) => {
         console.log(`🔑 ใช้ ${apiKey.name}`);
 
         // 3. Pre-processing (เฉพาะไฟล์ภาพ)
-        let fileBuffer = fs.readFileSync(tempFilePath);
+        const fileBuffer = fs.readFileSync(tempFilePath);
         let processedBuffer = fileBuffer;
         let preprocessed = false;
 

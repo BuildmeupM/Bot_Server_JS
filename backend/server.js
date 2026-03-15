@@ -16,11 +16,7 @@ app.use(express.urlencoded({ extended: true }));
 const uploadDir = path.join(__dirname, 'uploads');
 fs.ensureDirSync(uploadDir);
 
-// Initialize database
-const { initDB } = require('./database');
-initDB();
-
-// Initialize MySQL
+// Initialize MySQL (single database — SQLite removed)
 const { initMySQL } = require('./mysql');
 initMySQL();
 
@@ -41,6 +37,19 @@ app.use('/api/bot-automation', require('./routes/bot-automation'));
 // Health check
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', message: 'DocSort Pro API is running' });
+});
+
+// Global error handler — catches unhandled errors from all routes
+app.use((err, req, res, _next) => {
+    console.error('❌ Unhandled Error:', err.message);
+    console.error(err.stack);
+
+    const statusCode = err.statusCode || 500;
+    res.status(statusCode).json({
+        error: process.env.NODE_ENV === 'production'
+            ? 'เกิดข้อผิดพลาดในระบบ'
+            : err.message,
+    });
 });
 
 app.listen(PORT, () => {

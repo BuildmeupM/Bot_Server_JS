@@ -4,7 +4,7 @@ const fs = require('fs-extra');
 const { PDFDocument } = require('pdf-lib');
 const multer = require('multer');
 const authMiddleware = require('../../middleware/auth');
-const { logActivity } = require('../../database');
+const { logActivity } = require('../../mysql');
 
 const router = express.Router();
 

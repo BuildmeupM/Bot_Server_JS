@@ -92,7 +92,7 @@ function parseFileNamePattern(fileName) {
     if (!fileName) return result;
 
     // Remove .pdf extension
-    let name = fileName.replace(/\.pdf$/i, '').trim();
+    const name = fileName.replace(/\.pdf$/i, '').trim();
 
     // Split by ' - '
     const parts = name.split(' - ').map(p => p.trim());
@@ -443,7 +443,7 @@ async function buildExcelWorkbook(records, companiesMap) {
         const blReference = extractBLReference(rec.file_name);
 
         // Check amount mismatch — เก็บเป็น log (ไม่ใส่ในหมายเหตุ เพราะช่องนี้ไว้ให้ผู้ใช้กรอกเอง)
-        let remark = '';
+        const remark = '';
 
         // Account codes → multi-row if multiple
         const acctCodes = parsed.accountCodes.length > 0 ? parsed.accountCodes : [{ code: '', amount: '' }];

@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const authMiddleware = require('../../middleware/auth');
-const { logActivity } = require('../../database');
+const { logActivity } = require('../../mysql');
 
 // Helper: sanitize text for WinAnsi encoding (standard fonts can't render Thai/CJK)
 function safeText(str) {
@@ -73,13 +73,13 @@ function buildNewFilename(data) {
     const payPart = (paymentCodes || []).map(c => c.code).filter(Boolean).join('_');
 
     // Final: {ประเภทเอกสาร} - {โค้ดบัญชี_ยอดเงิน} - {ชื่อไฟล์เดิม} - {โค้ดชำระเงิน}.pdf
-    let nameParts = [];
+    const nameParts = [];
     if (docPart) nameParts.push(docPart);
     if (acctPart) nameParts.push(acctPart);
     if (originalName) nameParts.push(originalName);
     if (payPart) nameParts.push(payPart);
 
-    let filename = nameParts.join(' - ') + '.pdf';
+    const filename = nameParts.join(' - ') + '.pdf';
 
     return filename;
 }

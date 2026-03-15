@@ -70,7 +70,7 @@ export default defineConfig({
     plugins: [react(), lanAccessGuard()],
     server: {
         host: true,  // Bind to 0.0.0.0 — accept LAN connections
-        port: 5173,
+        port: 8080,
         fs: {
             allow: [
                 '..',

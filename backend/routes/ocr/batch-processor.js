@@ -320,7 +320,7 @@ async function processWorker(job, workerIndex, apiUrl) {
             }
 
             // 2. อ่านไฟล์
-            let fileBuffer = fs.readFileSync(filePath);
+            const fileBuffer = fs.readFileSync(filePath);
             const fileType = getFileType(fileName);
 
             // 3. Pre-processing (เฉพาะภาพ)

@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs-extra');
 const authMiddleware = require('../../middleware/auth');
-const { logActivity } = require('../../database');
+const { logActivity } = require('../../mysql');
 
 const router = express.Router();
 

@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# Database files
+*.db
+*.db-journal
+*.db-wal
+
+# Uploads & temp
+uploads/
+temp_uploads/
+screenshots/
+temp_*
+
+# Build output
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.log
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Temp scripts & test artifacts at root
+fix_syntax.js
+analyze_with_cdn.js
+test-parse.js
+test-parse-fix.js
+temp_doc.pdf
+temp_pdf_lib.js

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { getDB } = require('../../database');
+const { getPool } = require('../../mysql');
 
 // ─── Tax ID Checksum Validator ───
 function validateTaxId(taxId) {
@@ -18,40 +18,45 @@ function validateTaxId(taxId) {
 }
 
 // ─── Auto-save companies from OCR result ───
-// Called after OCR processing to upsert seller & buyer data
-router.post('/save-from-ocr', (req, res) => {
+router.post('/save-from-ocr', async (req, res) => {
     try {
-        const db = getDB();
-        const { companies } = req.body; // array of { taxId, nameTh, nameEn, address }
+        const pool = getPool();
+        const { companies } = req.body;
         if (!companies || !Array.isArray(companies)) {
             return res.status(400).json({ success: false, error: 'companies array required' });
         }
 
-        const upsertStmt = db.prepare(`
-            INSERT INTO companies_master (tax_id, name_th, name_en, address, tax_id_valid, source, times_seen)
-            VALUES (?, ?, ?, ?, ?, 'ocr', 1)
-            ON CONFLICT(tax_id) DO UPDATE SET
-                name_th = COALESCE(excluded.name_th, companies_master.name_th),
-                name_en = COALESCE(excluded.name_en, companies_master.name_en),
-                address = COALESCE(excluded.address, companies_master.address),
-                times_seen = companies_master.times_seen + 1,
-                last_seen_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
-        `);
-
         const results = [];
-        const txn = db.transaction(() => {
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
             for (const c of companies) {
                 if (!c.taxId) continue;
                 const cleanTaxId = c.taxId.replace(/\D/g, '');
-                if (cleanTaxId.length < 10) continue; // skip obviously bad data
+                if (cleanTaxId.length < 10) continue;
 
                 const validation = validateTaxId(c.taxId);
-                upsertStmt.run(cleanTaxId, c.nameTh || null, c.nameEn || null, c.address || null, validation.valid ? 1 : 0);
+                await conn.execute(
+                    `INSERT INTO companies_master (tax_id, name_th, name_en, address, tax_id_valid, source, times_seen)
+                     VALUES (?, ?, ?, ?, ?, 'ocr', 1)
+                     ON DUPLICATE KEY UPDATE
+                        name_th = COALESCE(VALUES(name_th), name_th),
+                        name_en = COALESCE(VALUES(name_en), name_en),
+                        address = COALESCE(VALUES(address), address),
+                        times_seen = times_seen + 1,
+                        last_seen_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP`,
+                    [cleanTaxId, c.nameTh || null, c.nameEn || null, c.address || null, validation.valid ? 1 : 0]
+                );
                 results.push({ taxId: cleanTaxId, taxIdValid: validation.valid, action: 'upserted' });
             }
-        });
-        txn();
+            await conn.commit();
+        } catch (txErr) {
+            await conn.rollback();
+            throw txErr;
+        } finally {
+            conn.release();
+        }
 
         res.json({ success: true, saved: results.length, results });
     } catch (err) {
@@ -61,9 +66,9 @@ router.post('/save-from-ocr', (req, res) => {
 });
 
 // ─── Get all companies ───
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
-        const db = getDB();
+        const pool = getPool();
         const { search, verified, limit = 50, offset = 0 } = req.query;
 
         let sql = 'SELECT * FROM companies_master WHERE 1=1';
@@ -81,8 +86,9 @@ router.get('/', (req, res) => {
         sql += ' ORDER BY last_seen_at DESC LIMIT ? OFFSET ?';
         params.push(parseInt(limit), parseInt(offset));
 
-        const companies = db.prepare(sql).all(...params);
-        const total = db.prepare('SELECT COUNT(*) as count FROM companies_master').get().count;
+        const [companies] = await pool.execute(sql, params);
+        const [countResult] = await pool.execute('SELECT COUNT(*) as count FROM companies_master');
+        const total = countResult[0].count;
 
         res.json({ success: true, companies, total });
     } catch (err) {
@@ -92,31 +98,29 @@ router.get('/', (req, res) => {
 });
 
 // ─── Lookup by Tax ID ───
-router.get('/lookup/:taxId', (req, res) => {
+router.get('/lookup/:taxId', async (req, res) => {
     try {
-        const db = getDB();
+        const pool = getPool();
         const cleanTaxId = req.params.taxId.replace(/\D/g, '');
-        const company = db.prepare('SELECT * FROM companies_master WHERE tax_id = ?').get(cleanTaxId);
+        const [rows] = await pool.execute('SELECT * FROM companies_master WHERE tax_id = ?', [cleanTaxId]);
+        const company = rows[0] || null;
         const validation = validateTaxId(cleanTaxId);
 
-        res.json({
-            success: true,
-            found: !!company,
-            company: company || null,
-            validation
-        });
+        res.json({ success: true, found: !!company, company, validation });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
 // ─── Verify / Unverify a company ───
-router.patch('/:id/verify', (req, res) => {
+router.patch('/:id/verify', async (req, res) => {
     try {
-        const db = getDB();
+        const pool = getPool();
         const { verified } = req.body;
-        db.prepare('UPDATE companies_master SET verified = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-            .run(verified ? 1 : 0, req.params.id);
+        await pool.execute(
+            'UPDATE companies_master SET verified = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [verified ? 1 : 0, req.params.id]
+        );
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -124,40 +128,40 @@ router.patch('/:id/verify', (req, res) => {
 });
 
 // ─── Update company info ───
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
     try {
-        const db = getDB();
+        const pool = getPool();
         const { nameTh, nameEn, address, taxId } = req.body;
 
-        // Re-validate if tax_id changed
         let taxIdValid = 0;
         if (taxId) {
             taxIdValid = validateTaxId(taxId).valid ? 1 : 0;
         }
 
-        db.prepare(`
-            UPDATE companies_master 
-            SET name_th = COALESCE(?, name_th), 
-                name_en = COALESCE(?, name_en), 
-                address = COALESCE(?, address),
-                tax_id = COALESCE(?, tax_id),
-                tax_id_valid = CASE WHEN ? IS NOT NULL THEN ? ELSE tax_id_valid END,
-                updated_at = CURRENT_TIMESTAMP 
-            WHERE id = ?
-        `).run(nameTh || null, nameEn || null, address || null, taxId || null, taxId || null, taxIdValid, req.params.id);
+        await pool.execute(
+            `UPDATE companies_master 
+             SET name_th = COALESCE(?, name_th), 
+                 name_en = COALESCE(?, name_en), 
+                 address = COALESCE(?, address),
+                 tax_id = COALESCE(?, tax_id),
+                 tax_id_valid = CASE WHEN ? IS NOT NULL THEN ? ELSE tax_id_valid END,
+                 updated_at = CURRENT_TIMESTAMP 
+             WHERE id = ?`,
+            [nameTh || null, nameEn || null, address || null, taxId || null, taxId || null, taxIdValid, req.params.id]
+        );
 
-        const updated = db.prepare('SELECT * FROM companies_master WHERE id = ?').get(req.params.id);
-        res.json({ success: true, company: updated });
+        const [rows] = await pool.execute('SELECT * FROM companies_master WHERE id = ?', [req.params.id]);
+        res.json({ success: true, company: rows[0] || null });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
 // ─── Delete company ───
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
     try {
-        const db = getDB();
-        db.prepare('DELETE FROM companies_master WHERE id = ?').run(req.params.id);
+        const pool = getPool();
+        await pool.execute('DELETE FROM companies_master WHERE id = ?', [req.params.id]);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -165,16 +169,25 @@ router.delete('/:id', (req, res) => {
 });
 
 // ─── Stats ───
-router.get('/stats/summary', (req, res) => {
+router.get('/stats/summary', async (req, res) => {
     try {
-        const db = getDB();
-        const total = db.prepare('SELECT COUNT(*) as count FROM companies_master').get().count;
-        const verified = db.prepare('SELECT COUNT(*) as count FROM companies_master WHERE verified = 1').get().count;
-        const validTaxId = db.prepare('SELECT COUNT(*) as count FROM companies_master WHERE tax_id_valid = 1').get().count;
-        const invalidTaxId = db.prepare('SELECT COUNT(*) as count FROM companies_master WHERE tax_id_valid = 0').get().count;
-        const topSeen = db.prepare('SELECT tax_id, name_th, times_seen FROM companies_master ORDER BY times_seen DESC LIMIT 10').all();
+        const pool = getPool();
+        const [totalR] = await pool.execute('SELECT COUNT(*) as count FROM companies_master');
+        const [verifiedR] = await pool.execute('SELECT COUNT(*) as count FROM companies_master WHERE verified = 1');
+        const [validR] = await pool.execute('SELECT COUNT(*) as count FROM companies_master WHERE tax_id_valid = 1');
+        const [invalidR] = await pool.execute('SELECT COUNT(*) as count FROM companies_master WHERE tax_id_valid = 0');
+        const [topSeen] = await pool.execute('SELECT tax_id, name_th, times_seen FROM companies_master ORDER BY times_seen DESC LIMIT 10');
 
-        res.json({ success: true, stats: { total, verified, validTaxId, invalidTaxId, topSeen } });
+        res.json({
+            success: true,
+            stats: {
+                total: totalR[0].count,
+                verified: verifiedR[0].count,
+                validTaxId: validR[0].count,
+                invalidTaxId: invalidR[0].count,
+                topSeen
+            }
+        });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }

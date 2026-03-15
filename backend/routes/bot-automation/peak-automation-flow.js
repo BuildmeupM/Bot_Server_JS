@@ -1,448 +1,13 @@
-const express = require("express");
-const router = express.Router();
-const { getDB } = require("../database");
-const { getPool } = require("../mysql");
-const crypto = require("crypto");
+const { getExcelVal } = require('./excel-parser');
 
-const ENCRYPTION_KEY =
-  process.env.JWT_SECRET || "fallback_secret_key_123456789012";
-
-// ==========================================
-// ENCRYPTION HELPERS
-// ==========================================
-function decrypt(text) {
-  if (!text) return text;
-  try {
-    const key = crypto
-      .createHash("sha256")
-      .update(String(ENCRYPTION_KEY))
-      .digest("base64")
-      .substring(0, 32);
-    let textParts = text.split(":");
-    let iv = Buffer.from(textParts.shift(), "hex");
-    let encryptedText = Buffer.from(textParts.join(":"), "hex");
-    let decipher = crypto.createDecipheriv("aes-256-cbc", Buffer.from(key), iv);
-    let decrypted = decipher.update(encryptedText);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
-    return decrypted.toString();
-  } catch (e) {
-    console.error("Decryption failed", e);
-    return text;
-  }
-}
-
-// ==========================================
-// JOB QUEUE SYSTEM & BROWSER MANAGEMENT
-// ==========================================
-const MAX_CONCURRENT = 5;
-const jobs = new Map(); // jobId -> job object
-const jobQueue = []; // waiting job IDs
-let jobCounter = 0;
-
-// Shared Browser Instance for Memory Efficiency
-let sharedBrowser = null;
-const { chromium } = require("playwright");
-
-// Cleanup old jobs periodically (every 1 hour), keeping jobs only for the last 24 hours
-setInterval(
-  () => {
-    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-    const now = Date.now();
-    for (const [jobId, job] of jobs.entries()) {
-      const jobAgeDate = job.finishedAt || job.createdAt;
-      if (jobAgeDate && now - new Date(jobAgeDate).getTime() > ONE_DAY_MS) {
-        // Memory cleanup: close context if orphaned
-        if (job.context) {
-          job.context.close().catch(console.error);
-        }
-        jobs.delete(jobId);
-      }
-    }
-  },
-  60 * 60 * 1000,
-);
-
-function generateJobId() {
-  jobCounter++;
-  const ts = Date.now().toString(36);
-  return `JOB-${ts}-${String(jobCounter).padStart(3, "0")}`;
-}
-
-function createJob(profileId, profile, excelPath) {
-  const jobId = generateJobId();
-  const job = {
-    id: jobId,
-    profileId,
-    profileName: profile.platform,
-    username: profile.username,
-    software: profile.software,
-    peakCode: profile.peak_code,
-    vatStatus: profile.vat_status || 'registered',
-    excelPath,
-    status: "queued", // queued | running | logged_in | working | done | error | stopped
-    logs: [],
-    browser: null, // Note: browser property is left for backwards compatibility but we'll use sharedBrowser
-    page: null,
-    context: null,
-    createdAt: new Date().toISOString(),
-    startedAt: null,
-    finishedAt: null,
-  };
-  jobs.set(jobId, job);
-  return job;
-}
-
-function addLog(jobId, level, message) {
-  const job = jobs.get(jobId);
-  if (!job) return;
-  const entry = {
-    time: new Date().toLocaleTimeString("th-TH", { hour12: false }),
-    level, // info | success | warn | error
-    message,
-  };
-  job.logs.push(entry);
-
-  // Notify SSE clients
-  const clients = sseClients.get(jobId);
-  if (clients && clients.length) {
-    const data = JSON.stringify(entry);
-    clients.forEach((res) => {
-      try {
-        res.write(`data: ${data}\n\n`);
-      } catch (e) {}
-    });
-  }
-}
-
-// SSE client tracking
-const sseClients = new Map(); // jobId -> [res, res, ...]
-
-// ==========================================
-// EXCEL PARSER
-// ==========================================
-async function parseExcelData(excelPath, jobId) {
-  const fs = require("fs");
-  const path = require("path");
-  const xlsx = require("xlsx");
-
-  // Fallback if null
-  if (!excelPath) throw new Error("ไม่ได้ระบุชื่อไฟล์ Excel");
-
-  let filePath = excelPath;
-
-  // If it's a relative filename, fallback to old default directory logic to preserve existing tests/behavior
-  if (!excelPath.includes('/') && !excelPath.includes('\\')) {
-    const uploadsDir =
-      process.env.EXCEL_UPLOADS_DIR ||
-      path.join(
-        "V:",
-        "A.โฟร์เดอร์หลัก",
-        "Build000 ทดสอบระบบ",
-        "test",
-        "ทดสอบระบบแยกเอกสาร",
-      );
-    filePath = path.join(uploadsDir, excelPath);
-  }
-
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`ไม่พบไฟล์: ${filePath}`);
-  }
-
-  try {
-    // Use fs.promises.readFile and wrap in a Promise to yield event loop
-    return await new Promise(async (resolve, reject) => {
-      try {
-        const buffer = await fs.promises.readFile(filePath);
-
-        // Note: xlsx.read with buffer is still sync, but doing readFile async
-        // minimizes the total blocking time.
-        const workbook = xlsx.read(buffer, { type: "buffer" });
-
-        const getSheetData = (sheetName) => {
-          if (workbook.Sheets[sheetName]) {
-            return xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-          }
-          return [];
-        };
-
-        const vatTransactions = getSheetData("มีภาษีมูลค่าเพิ่ม");
-        const nonVatTransactions = getSheetData("ไม่มีภาษีมูลค่าเพิ่ม");
-        const vendors = getSheetData("ที่อยู่แต่ละบริษัท");
-
-        const allTransactions = [...vatTransactions, ...nonVatTransactions];
-
-        if (allTransactions.length === 0) {
-          addLog(
-            jobId,
-            "warn",
-            '⚠️ ไม่พบรายการค่าใช้จ่ายในชีต "มีภาษีมูลค่าเพิ่ม" และ "ไม่มีภาษีมูลค่าเพิ่ม"',
-          );
-        }
-        if (vendors.length === 0) {
-          addLog(
-            jobId,
-            "warn",
-            '⚠️ ไม่พบข้อมูลผู้ขายในชีต "ที่อยู่แต่ละบริษัท"',
-          );
-        }
-
-        // --- Validation: ตรวจสอบคอลัมน์ที่จำเป็น ---
-        const requiredColumns = [
-          'ลำดับ',
-          'ชื่อบริษัท - ผู้ขาย',
-          'เลขประจำตัวผู้เสียภาษี',
-          'วันที่',
-          'โค้ดบันทึกบัญชี',
-          'ยอดก่อนภาษีมูลค่าเพิ่ม',
-          'ยอดหลังบวกภาษีมูลค่าเพิ่ม',
-          'ชื่อไฟล์ใหม่',
-          'ชื่อไฟล์เก่า'
-        ];
-
-        // ฟังก์ชันหาค่าแบบยืดหยุ่น (รองรับชื่อคอลัมน์ที่มี whitespace ต่างกัน)
-        const flexFind = (row, keyword) => {
-          const cleanKw = keyword.replace(/[\n\r\s]/g, '');
-          const key = Object.keys(row).find(k => k.replace(/[\n\r\s]/g, '').includes(cleanKw));
-          return key ? row[key] : undefined;
-        };
-
-        let skippedCount = 0;
-        const validTransactions = allTransactions.filter((tx, idx) => {
-          const missingCols = [];
-          for (const col of requiredColumns) {
-            const val = flexFind(tx, col);
-            if (val === undefined || val === null || String(val).trim() === '') {
-              missingCols.push(col);
-            }
-          }
-          if (missingCols.length > 0) {
-            const rowNum = flexFind(tx, 'ลำดับ') || (idx + 1);
-            addLog(jobId, "warn", `⚠️ ข้ามรายการที่ ${rowNum} — ข้อมูลไม่ครบ: ${missingCols.join(', ')}`);
-            skippedCount++;
-            return false;
-          }
-          return true;
-        });
-
-        if (skippedCount > 0) {
-          addLog(jobId, "warn", `⚠️ ข้ามรายการทั้งหมด ${skippedCount} รายการ (ข้อมูลไม่ครบ) เหลือ ${validTransactions.length} รายการที่พร้อมทำงาน`);
-        }
-
-        // --- Validation: ตรวจสอบไฟล์ต้นทางว่ามีอยู่จริงหรือไม่ ---
-        const excelDir = path.dirname(filePath);
-        let missingFiles = [];
-        for (const tx of validTransactions) {
-          const oldFile = flexFind(tx, 'ชื่อไฟล์เก่า');
-          if (oldFile && String(oldFile).trim()) {
-            const srcPath = path.join(excelDir, String(oldFile).trim());
-            if (!fs.existsSync(srcPath)) {
-              const rowNum = flexFind(tx, 'ลำดับ') || '?';
-              missingFiles.push({ row: rowNum, file: String(oldFile).trim() });
-            }
-          }
-        }
-
-        if (missingFiles.length > 0) {
-          addLog(jobId, "error", `❌ พบ ${missingFiles.length} ไฟล์ต้นทางที่ไม่มีอยู่ในโฟลเดอร์:`);
-          for (const mf of missingFiles) {
-            addLog(jobId, "error", `   ❌ แถว ${mf.row}: ${mf.file}`);
-          }
-          addLog(jobId, "error", `📁 โฟลเดอร์: ${excelDir}`);
-        }
-
-        resolve({
-          transactions: validTransactions,
-          vendors: vendors,
-          skippedCount: skippedCount,
-          missingFiles: missingFiles,
-        });
-      } catch (innerE) {
-        reject(innerE);
-      }
-    });
-  } catch (e) {
-    throw new Error(`เกิดข้อผิดพลาดในการอ่านไฟล์: ${e.message}`);
-  }
-}
-
-// ==========================================
-// QUEUE PROCESSOR
-// ==========================================
-function getRunningCount() {
-  let count = 0;
-  for (const job of jobs.values()) {
-    if (["running", "logged_in", "working"].includes(job.status)) count++;
-  }
-  return count;
-}
-
-async function processQueue() {
-  while (jobQueue.length > 0 && getRunningCount() < MAX_CONCURRENT) {
-    const jobId = jobQueue.shift();
-    const job = jobs.get(jobId);
-    if (!job || job.status !== "queued") continue;
-
-    // Start this job
-    executeJob(job).catch((err) => {
-      console.error(`Job ${job.id} failed:`, err);
-      job.status = "error";
-      job.finishedAt = new Date().toISOString();
-      addLog(job.id, "error", `เกิดข้อผิดพลาด: ${err.message}`);
-    });
-  }
-}
-
-async function executeJob(job) {
-  job.status = "running";
-  job.startedAt = new Date().toISOString();
-  addLog(job.id, "info", "🚀 เริ่มต้นทำงาน...");
-
-  try {
-    // 0. Parse Excel first
-    addLog(
-      job.id,
-      "info",
-      `📁 กำลังอ่านออเดอร์จากไฟล์ Excel: ${job.excelPath}...`,
-    );
-    try {
-      const excelData = await parseExcelData(job.excelPath, job.id);
-      job.excelData = excelData;
-      
-      // ถ้ามีรายการถูกข้าม (ข้อมูลไม่ครบ) → หยุดทันที ไม่เข้า Login
-      if (excelData.skippedCount > 0) {
-        addLog(job.id, "error", `❌ พบ ${excelData.skippedCount} รายการที่ข้อมูลไม่ครบ — กรุณาแก้ไข Excel แล้วลองใหม่ (ระบบหยุดก่อน Login)`);
-        job.status = "error";
-        job.finishedAt = new Date().toISOString();
-        return;
-      }
-
-      // ถ้ามีไฟล์ต้นทางหายไป → หยุดทันที ไม่เข้า Login
-      if (excelData.missingFiles && excelData.missingFiles.length > 0) {
-        addLog(job.id, "error", `❌ พบ ${excelData.missingFiles.length} ไฟล์ต้นทางที่ไม่มีอยู่จริง — กรุณาเช็คไฟล์แล้วลองใหม่ (ระบบหยุดก่อน Login)`);
-        job.status = "error";
-        job.finishedAt = new Date().toISOString();
-        return;
-      }
-      
-      if (excelData.transactions.length === 0) {
-        addLog(job.id, "error", `❌ ไม่พบรายการที่พร้อมทำงาน — กรุณาตรวจสอบ Excel`);
-        job.status = "error";
-        job.finishedAt = new Date().toISOString();
-        return;
-      }
-      
-      addLog(
-        job.id,
-        "success",
-        `✅ อ่านไฟล์แล้วพบ ค่าใช้จ่าย ${excelData.transactions.length} รายการ | ข้อมูลผู้ขายรวม ${excelData.vendors.length} บริษัท`,
-      );
-    } catch (excelErr) {
-      addLog(
-        job.id,
-        "error",
-        `❌ ไม่สามารถอ่านไฟล์ Excel ได้: ${excelErr.message}`,
-      );
-      throw excelErr;
-    }
-
-    // 1. Launch / reuse browser
-    addLog(job.id, "info", "🌐 กำลังเตรียมเบราว์เซอร์...");
-    if (!sharedBrowser || !sharedBrowser.isConnected()) {
-      addLog(
-        job.id,
-        "info",
-        "🔧 กำลังเปิด Browser Instance หลัก (ครั้งแรก หรือเปิดใหม่)...",
-      );
-      sharedBrowser = await chromium.launch({
-        headless: false,
-        args: ["--start-maximized"],
-      });
-    }
-
-    // Use an isolated context for each job
-    const context = await sharedBrowser.newContext({ viewport: null });
-    let page = await context.newPage();
-
-    job.browser = sharedBrowser; // Store ref but we don't close it
-    job.context = context;
-    job.page = page;
-
-    // ตรวจจับเมื่อ page ถูกปิดจากภายนอก (เช่น PEAK redirect)
-    page.on("close", () => {
-      addLog(
-        job.id,
-        "warn",
-        "⚠️ Page ถูกปิดจากภายนอก (detected by close event)",
-      );
-    });
-    addLog(job.id, "success", "✅ เตรียมเบราว์เซอร์สำเร็จ");
-
-    // 2. Navigate to PEAK
-    addLog(job.id, "info", "🔗 กำลังเข้าหน้า Login PEAK...");
-    await page.goto("https://secure.peakaccount.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30000,
-    });
-    addLog(job.id, "success", "✅ เข้าหน้า Login สำเร็จ");
-
-    // 3. Wait for form using locator
-    addLog(job.id, "info", "⏳ รอฟอร์ม Login โหลด...");
-    const emailInput = page.locator(
-      "input[placeholder='กรุณากรอกข้อมูลอีเมล']",
-    );
-    await emailInput.waitFor({ state: "visible", timeout: 15000 });
-
-    // 4. Fill credentials
-    addLog(job.id, "info", `📧 กรอกอีเมล: ${job.username}`);
-    await emailInput.fill(job.username);
-
-    // Decrypt password (from MySQL)
-    const pool = getPool();
-    const [profileRows] = await pool.execute("SELECT password FROM bot_profiles WHERE id = ?", [job.profileId]);
-    const profileData = profileRows[0];
-    if (!profileData) {
-      addLog(job.id, "error", `❌ ไม่พบ Profile ID: ${job.profileId} ใน Database`);
-      throw new Error("Profile not found in MySQL");
-    }
-    const password = decrypt(profileData.password);
-
-    addLog(job.id, "info", "🔒 กรอกรหัสผ่าน: ********");
-    await page.fill("input[placeholder='กรุณากรอกข้อมูลรหัสผ่าน']", password);
-
-    // 5. Click login
-    addLog(job.id, "info", "🖱️ คลิกเข้าสู่ระบบ PEAK...");
-    await page.click('button:has-text("เข้าสู่ระบบ PEAK")');
-    await page.waitForTimeout(2000); // รอให้หน้า redirect
-
-    // 6. Wait for navigation
-    try {
-      await page.waitForURL("**/*", { timeout: 15000 });
-
-      const currentUrl = page.url();
-      if (currentUrl.includes("/home") || currentUrl.includes("/selectlist")) {
-        job.status = "logged_in";
-        addLog(job.id, "success", `✅ Login สำเร็จ! (${currentUrl})`);
-
-        // Update DB status (MySQL)
-        await pool.execute(
-          "UPDATE bot_profiles SET status = ?, last_sync = ? WHERE id = ?",
-          ["running", new Date().toISOString(), job.profileId]
-        );
-      } else {
-        job.status = "logged_in";
-        addLog(job.id, "warn", `⚠️ Login อาจไม่สำเร็จ — URL: ${currentUrl}`);
-      }
-    } catch (navErr) {
-      job.status = "logged_in";
-      addLog(
-        job.id,
-        "warn",
-        "⚠️ รอ navigation timeout — กรุณาตรวจสอบเบราว์เซอร์",
-      );
-    }
-
+/**
+ * Core PEAK automation flow — company navigation, vendor handling,
+ * form filling, VAT editing, file operations, and payment processing.
+ *
+ * This function is called AFTER login is complete.
+ */
+async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
     // 7. Navigate to Company Home Page using PEAK Code
-    const peakCode = job.peakCode;
     if (peakCode) {
       addLog(
         job.id,
@@ -1051,7 +616,7 @@ async function executeJob(job) {
               // ปัญหาของ PEAK คือกล่อง Input แบบย่อ อาจทำให้ actionability (คลิก) ผิดพลาดได้ถ้าฟอร์มโดนบังด้วย Text
               // วิธีที่ชัวร์ที่สุดคือเช็คว่ามีคำว่า "แขวง/ตำบล" ปรากฏบนจอหรือไม่ (ถ้าไม่มี = แบบฟอร์มถูกย่ออยู่ 100%)
               const subDistrictLabel = modalContent.getByText("แขวง/ตำบล").first();
-              let isExpanded = await subDistrictLabel.isVisible({ timeout: 1000 }).catch(() => false);
+              const isExpanded = await subDistrictLabel.isVisible({ timeout: 1000 }).catch(() => false);
               
               if (!isExpanded) {
                 try {
@@ -1754,7 +1319,7 @@ async function executeJob(job) {
                       
                       // เช็คว่า textarea มองเห็นไหม ถ้าไม่เห็น ต้องกดกาง
                       const noteTextarea = page.locator('textarea#หมายเหตุสำหรับผู้ขาย, textarea[id="หมายเหตุสำหรับผู้ขาย"]').first();
-                      let isTextareaVisible = await noteTextarea.isVisible({ timeout: 1000 }).catch(() => false);
+                      const isTextareaVisible = await noteTextarea.isVisible({ timeout: 1000 }).catch(() => false);
                       
                       if (!isTextareaVisible) {
                           // กดปุ่ม "ย่อ/ขยาย" ภายใน section หมายเหตุ
@@ -1834,7 +1399,12 @@ async function executeJob(job) {
 
                   addLog(job.id, "success", `\u0e2d\u0e19\u0e38\u0e21\u0e31\u0e15\u0e34\u0e2a\u0e33\u0e40\u0e23\u0e47\u0e08! \u0e44\u0e14\u0e49\u0e23\u0e31\u0e1a\u0e40\u0e25\u0e02\u0e17\u0e35\u0e48\u0e40\u0e2d\u0e01\u0e2a\u0e32\u0e23\u0e43\u0e2b\u0e21\u0e48: ${finalDocId}`);
 
+                  // ตรวจสอบว่าบริษัทจดทะเบียนภาษีมูลค่าเพิ่มหรือไม่
+                  const isVatRegistered = job.vatStatus === 'registered';
                   let expectedVat = 0;
+                  
+                  if (isVatRegistered) {
+                  // --- เฉพาะบริษัทที่จดภาษี: ตรวจสอบและแก้ไขยอด VAT ---
                   for (const row of docGroup) {
                       const vStr = row["\u0e22\u0e2d\u0e14\u0e20\u0e32\u0e29\u0e35\u0e21\u0e39\u0e25\u0e04\u0e48\u0e32\u0e40\u0e1e\u0e34\u0e48\u0e21"] || row["\u0e20\u0e32\u0e29\u0e35\u0e21\u0e39\u0e25\u0e04\u0e48\u0e32\u0e40\u0e1e\u0e34\u0e48\u0e21"] || "0";
                       expectedVat += parseFloat(String(vStr).replace(/,/g, '')) || 0;
@@ -1995,6 +1565,10 @@ async function executeJob(job) {
                   } else {
                       addLog(job.id, "success", `✅ ยอดภาษีมูลค่าเพิ่มตรงกัน (${actualVat}) ไม่ต้องแก้ไขเพิ่มเติม`);
                   }
+                  } else {
+                      // ไม่จดทะเบียนภาษี → ข้ามการตรวจสอบ VAT ทั้งหมด
+                      addLog(job.id, "info", `ℹ️ บริษัทไม่ได้จดทะเบียนภาษีมูลค่าเพิ่ม — ข้ามการตรวจสอบ VAT`);
+                  }
                   // --------------------------------------------------------
                   
                   // --- 10. เปลี่ยนชื่อไฟล์ (File Rename) ---
@@ -2022,8 +1596,7 @@ async function executeJob(job) {
                               // ดึงนามสกุลไฟล์เดิม
                               const fileExt = pathRename.extname(oldFileStr);
                               
-                              // ตรวจสอบ vatStatus จาก DB และยอด VAT จาก Excel
-                              const isVatRegistered = job.vatStatus === 'registered';
+                              // ใช้ isVatRegistered ที่ประกาศไว้แล้วด้านบน + ยอด VAT จาก Excel
                               const hasVatAmount = expectedVat > 0;
                               
                               // เช็ค WHT จาก Excel (ทุก row ในบิลนี้)
@@ -2037,28 +1610,28 @@ async function executeJob(job) {
                               }
                               
                               let destName = '';
-                              const whtPrefix = hasWhtForName ? 'WHT ' : '';
+                              const whtPrefix = hasWhtForName ? 'WHT_' : '';
                               
                               if (isVatRegistered && hasVatAmount) {
                                   // จดทะเบียนภาษี + มียอด VAT → [WHT] dd_mm_yyyy EXP-NUMBER ชื่อไฟล์ใหม่ VAT
                                   let dateForName = '';
                                   const rawDate = primaryTx['วันที่'];
                                   if (rawDate) {
-                                      let dStr = String(rawDate).trim();
+                                      const dStr = String(rawDate).trim();
                                       if (!isNaN(dStr) && Number(dStr) >= 20000) {
                                           const d = new Date(Math.round((Number(dStr) - 25569) * 86400 * 1000));
-                                          dateForName = `${String(d.getDate()).padStart(2,'0')}_${String(d.getMonth()+1).padStart(2,'0')}_${d.getFullYear()}`;
+                                          dateForName = `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`;
                                       } else if (dStr.includes('/')) {
-                                          dateForName = dStr.replace(/\//g, '_');
+                                          dateForName = dStr.replace(/\//g, '.');
                                       } else if (dStr.includes('-')) {
                                           const p = dStr.split('-');
-                                          if (p.length === 3) dateForName = `${p[2]}_${p[1]}_${p[0]}`;
+                                          if (p.length === 3) dateForName = `${p[2]}.${p[1]}.${p[0]}`;
                                       }
                                   }
-                                  destName = `${whtPrefix}${dateForName} ${finalDocId} ${newFileStr} VAT${fileExt}`;
+                                  destName = `${dateForName}_${whtPrefix}${finalDocId}_${newFileStr}_VAT${fileExt}`;
                               } else {
                                   // ยังไม่จดภาษี หรือ จดแล้วแต่ไม่มียอด VAT → [WHT] EXP-NUMBER ชื่อไฟล์ใหม่
-                                  destName = `${whtPrefix}${finalDocId} ${newFileStr}${fileExt}`;
+                                  destName = `${whtPrefix}${finalDocId}_${newFileStr}${fileExt}`;
                               }
                               
                               const destPath = pathRename.join(excelDir, destName);
@@ -2140,7 +1713,7 @@ async function executeJob(job) {
                                   let subFolder = 'NoneVat';
                                   if (hasWht) {
                                       subFolder = 'WHT';
-                                  } else if (hasVatAmount) {
+                                  } else if (isVatRegistered && hasVatAmount) {
                                       subFolder = 'VAT';
                                   }
                                   
@@ -2482,255 +2055,7 @@ async function executeJob(job) {
       try {
         if (job.context) await job.context.close();
       } catch (e) {}
-    } else {
-      addLog(
-        job.id,
-        "error",
-        "❌ ไม่พบ PEAK Code ในโปรไฟล์ ไม่สามารถเข้าหน้าบริษัทได้",
-      );
-      job.status = "error";
-      throw new Error("Missing PEAK Code in Profile");
     }
-  } catch (error) {
-    job.status = "error";
-    job.finishedAt = new Date().toISOString();
-    addLog(job.id, "error", `❌ เกิดข้อผิดพลาด: ${error.message}`);
-
-    // Cleanup Context (Keep sharedBrowser alive)
-    try {
-      if (job.context) await job.context.close();
-    } catch (e) {}
-    job.page = null;
-    job.context = null;
-
-    // Try next in queue
-    processQueue();
-  }
 }
 
-// ==========================================
-// API: LIST EXCEL FILES
-// ==========================================
-router.get("/excel-files", (req, res) => {
-  try {
-    const fs = require("fs");
-    const path = require("path");
-    
-    let uploadsDir = req.query.dir;
-    if (!uploadsDir) {
-      uploadsDir =
-        process.env.EXCEL_UPLOADS_DIR ||
-        path.join(
-          "V:",
-          "A.โฟร์เดอร์หลัก",
-          "Build000 ทดสอบระบบ",
-          "test",
-          "ทดสอบระบบแยกเอกสาร",
-        );
-    }
-
-    // Ensure directory exists
-    if (!fs.existsSync(uploadsDir)) {
-      // Only try to create if it's not a root drive that we might not have permission to write to
-      try {
-        fs.mkdirSync(uploadsDir, { recursive: true });
-      } catch (e) {
-        console.warn("Could not create uploads directory", e.message);
-      }
-    }
-
-    let excelFiles = [];
-    if (fs.existsSync(uploadsDir)) {
-      const files = fs.readdirSync(uploadsDir);
-      excelFiles = files.filter(
-        (file) => file.endsWith(".xlsx") && !file.startsWith("~$"),
-      ).map((f) => path.join(uploadsDir, f));
-    }
-
-    res.json({ success: true, files: excelFiles, directory: uploadsDir });
-  } catch (error) {
-    console.error("Error listing excel files:", error);
-    res
-      .status(500)
-      .json({ error: "Failed to list excel files", details: error.message });
-  }
-});
-
-// ==========================================
-// API: START BOT (Queue a job)
-// ==========================================
-router.post("/start", async (req, res) => {
-  const { profileId, excelPath } = req.body;
-  if (!profileId) return res.status(400).json({ error: "Missing profileId" });
-
-  try {
-    const pool = getPool();
-    const [profileRows] = await pool.execute("SELECT * FROM bot_profiles WHERE id = ?", [profileId]);
-    const profile = profileRows[0];
-    if (!profile) return res.status(404).json({ error: "Profile not found" });
-
-    const job = createJob(profileId, profile, excelPath);
-
-    if (getRunningCount() < MAX_CONCURRENT) {
-      addLog(job.id, "info", "🎯 เริ่มทำงานทันที (ไม่ต้องรอคิว)");
-      executeJob(job).catch((err) => {
-        job.status = "error";
-        job.finishedAt = new Date().toISOString();
-        addLog(job.id, "error", `เกิดข้อผิดพลาด: ${err.message}`);
-      });
-    } else {
-      jobQueue.push(job.id);
-      const position = jobQueue.length;
-      addLog(
-        job.id,
-        "warn",
-        `⏳ เข้าคิวรอ — ลำดับที่ ${position} (กำลังรัน ${getRunningCount()}/${MAX_CONCURRENT})`,
-      );
-    }
-
-    res.json({
-      success: true,
-      jobId: job.id,
-      status: job.status,
-      queuePosition: job.status === "queued" ? jobQueue.indexOf(job.id) + 1 : 0,
-      runningCount: getRunningCount(),
-      maxConcurrent: MAX_CONCURRENT,
-    });
-  } catch (error) {
-    console.error("Bot start error:", error);
-    res
-      .status(500)
-      .json({ error: "Failed to start bot", details: error.message });
-  }
-});
-
-// ==========================================
-// API: LIST ALL JOBS
-// ==========================================
-router.get("/jobs", (req, res) => {
-  const jobList = [];
-  for (const [id, job] of jobs) {
-    jobList.push({
-      id: job.id,
-      profileId: job.profileId,
-      profileName: job.profileName,
-      username: job.username,
-      excelPath: job.excelPath,
-      status: job.status,
-      logCount: job.logs.length,
-      createdAt: job.createdAt,
-      startedAt: job.startedAt,
-      finishedAt: job.finishedAt,
-    });
-  }
-  // Sort: running first, then queued, then done
-  const order = {
-    running: 0,
-    logged_in: 0,
-    working: 0,
-    queued: 1,
-    done: 2,
-    error: 3,
-    stopped: 4,
-  };
-  jobList.sort((a, b) => (order[a.status] ?? 5) - (order[b.status] ?? 5));
-
-  res.json({
-    jobs: jobList,
-    runningCount: getRunningCount(),
-    queuedCount: jobQueue.length,
-    maxConcurrent: MAX_CONCURRENT,
-  });
-});
-
-// ==========================================
-// API: GET JOB LOGS
-// ==========================================
-router.get("/logs/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: "Job not found" });
-
-  res.json({
-    jobId: job.id,
-    status: job.status,
-    logs: job.logs,
-  });
-});
-
-// ==========================================
-// API: SSE STREAM (Real-time logs)
-// ==========================================
-router.get("/stream/:jobId", (req, res) => {
-  const jobId = req.params.jobId;
-  const job = jobs.get(jobId);
-  if (!job) return res.status(404).json({ error: "Job not found" });
-
-  // SSE headers
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  res.flushHeaders();
-
-  // Send existing logs first
-  job.logs.forEach((entry) => {
-    res.write(`data: ${JSON.stringify(entry)}\n\n`);
-  });
-
-  // Register client
-  if (!sseClients.has(jobId)) sseClients.set(jobId, []);
-  sseClients.get(jobId).push(res);
-
-  // Cleanup on disconnect
-  req.on("close", () => {
-    const clients = sseClients.get(jobId);
-    if (clients) {
-      const idx = clients.indexOf(res);
-      if (idx > -1) clients.splice(idx, 1);
-      if (clients.length === 0) sseClients.delete(jobId);
-    }
-  });
-});
-
-// ==========================================
-// API: STOP JOB
-// ==========================================
-router.post("/stop/:jobId", async (req, res) => {
-  const jobId = req.params.jobId;
-  const job = jobs.get(jobId);
-  if (!job) return res.json({ success: true, message: "Job not found" });
-
-  // Remove from queue if queued
-  const qIdx = jobQueue.indexOf(jobId);
-  if (qIdx > -1) jobQueue.splice(qIdx, 1);
-
-  // Close browser if running
-  if (job.browser) {
-    try {
-      await job.browser.close();
-    } catch (e) {}
-    job.browser = null;
-    job.page = null;
-    job.context = null;
-  }
-
-  job.status = "stopped";
-  job.finishedAt = new Date().toISOString();
-  addLog(jobId, "warn", "⏹️ บอทถูกหยุดโดยผู้ใช้");
-
-  // Update profile status (MySQL)
-  try {
-    const pool = getPool();
-    await pool.execute("UPDATE bot_profiles SET status = ? WHERE id = ?", [
-      "idle",
-      job.profileId,
-    ]);
-  } catch (e) {}
-
-  // Process next in queue
-  processQueue();
-
-  res.json({ success: true, message: "Bot stopped" });
-});
-
-module.exports = router;
+module.exports = { executeJobFlow };

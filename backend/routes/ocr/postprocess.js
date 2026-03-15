@@ -10,7 +10,7 @@
 function fixTaxId(raw) {
     if (!raw) return '';
 
-    let cleaned = String(raw)
+    const cleaned = String(raw)
         .replace(/[Oo]/g, '0')    // O → 0
         .replace(/[Il|]/g, '1')   // I, l, | → 1
         .replace(/[Ss]/g, '5')    // S → 5
@@ -53,8 +53,8 @@ function fixDate(raw) {
     const match = cleaned.match(/(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
     if (!match) return cleaned; // ไม่สามารถ parse ได้
 
-    let day = parseInt(match[1], 10);
-    let month = parseInt(match[2], 10);
+    const day = parseInt(match[1], 10);
+    const month = parseInt(match[2], 10);
     let year = parseInt(match[3], 10);
 
     // แปลง 2-digit year → 4-digit

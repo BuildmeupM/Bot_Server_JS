@@ -305,7 +305,7 @@ export default function OcrBatchPanel() {
         }
     }
 
-    // ── Export Excel via backend API ──
+    // ── Export Excel via backend API (scoped to this batch) ──
     const handleExportExcel = async () => {
         if (!jobDetail?.results?.length) return
         setExporting(true)
@@ -319,7 +319,16 @@ export default function OcrBatchPanel() {
                 toast.error('ไม่พบ Build Code จากไฟล์ — ไม่สามารถส่งออก Excel ได้')
                 return
             }
-            const res = await fetch(`http://localhost:4000/api/ocr/export-excel/${encodeURIComponent(buildCode)}`)
+            // ส่ง fileNames จาก batch results เพื่อ export เฉพาะไฟล์ของ batch นี้
+            const batchFileNames = jobDetail.results
+                .filter(r => r.status === 'done' && r.fileName)
+                .map(r => r.fileName)
+            const params = new URLSearchParams()
+            if (batchFileNames.length > 0) {
+                params.set('fileNames', encodeURIComponent(JSON.stringify(batchFileNames)))
+            }
+            const qs = params.toString() ? `?${params.toString()}` : ''
+            const res = await fetch(`/api/ocr/export-excel/${encodeURIComponent(buildCode)}${qs}`)
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}))
                 toast.error(err.error || 'เกิดข้อผิดพลาดในการส่งออก Excel')

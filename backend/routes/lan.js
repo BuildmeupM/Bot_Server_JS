@@ -28,8 +28,8 @@ router.get('/', async (req, res) => {
         res.json({
             enabled,
             ips,
-            port: 5173,
-            urls: enabled ? ips.map(ip => `http://${ip.address}:5173`) : []
+            port: 8000,
+            urls: enabled ? ips.map(ip => `http://${ip.address}:8000`) : []
         });
     } catch (err) {
         console.error('❌ LAN status error:', err);
@@ -57,14 +57,14 @@ router.post('/', async (req, res) => {
 
         console.log(`🌐 LAN access ${enabled ? 'ENABLED' : 'DISABLED'}`);
         if (enabled && ips.length > 0) {
-            console.log(`   Access URLs: ${ips.map(ip => `http://${ip.address}:5173`).join(', ')}`);
+            console.log(`   Access URLs: ${ips.map(ip => `http://${ip.address}:8000`).join(', ')}`);
         }
 
         res.json({
             enabled,
             ips,
-            port: 5173,
-            urls: enabled ? ips.map(ip => `http://${ip.address}:5173`) : []
+            port: 8000,
+            urls: enabled ? ips.map(ip => `http://${ip.address}:8000`) : []
         });
     } catch (err) {
         console.error('❌ LAN toggle error:', err);

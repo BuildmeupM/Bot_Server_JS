@@ -13,7 +13,7 @@ flowchart TD
     B1 -- "❌ เต็ม" --> B2["⏳ เข้าคิวรอ FIFO"]
     B2 -.-> C
 
-    C["📁 อ่านไฟล์ Excel"] --> C1["Sheet: มีภาษีมูลค่าเพิ่ม<br/>Sheet: ไม่มีภาษีมูลค่าเพิ่ม<br/>Sheet: ที่อยู่แต่ละบริษัท"]
+    C["📁 อ่านไฟล์ Excel"] --> C1["Sheet: มีภาษีมูลค่าเพิ่ม → tag _sheetType=VAT<br/>Sheet: ไม่มีภาษีมูลค่าเพิ่ม → tag _sheetType=NoneVat<br/>Sheet: ที่อยู่แต่ละบริษัท"]
     C1 --> C2{"ตรวจ 9 คอลัมน์ที่จำเป็น<br/>ข้อมูลครบถ้วน?"}
     C2 -- "❌ ไม่ครบ" --> C3["❌ หยุด — แจ้งแก้ไข Excel<br/>ระบุว่าแถวไหนขาดคอลัมน์อะไร"]
     C2 -- "✅ ครบ" --> C5{"📂 ตรวจไฟล์ต้นทาง<br/>ชื่อไฟล์เก่า มีอยู่จริง?"}
@@ -33,7 +33,7 @@ flowchart TD
 
     F["🏢 เข้าหน้าบริษัท emi=peakCode"] --> F1
 
-    F1["🔑 ตรวจสอบสิทธิ์ผู้ใช้<br/>เข้า /setting/userSetting?emi=peakCode&reload=1"] --> F2["อ่านตาราง ผู้ใช้งานในระบบ<br/>ค้นหาชื่อ Kanokwan somsri"]
+    F1["🔑 ตรวจสอบสิทธิ์ผู้ใช้<br/>เข้า /setting/userSetting"] --> F2["อ่านตาราง ผู้ใช้งานในระบบ<br/>ค้นหาชื่อ Kanokwan somsri"]
     F2 --> F3{"พบ Kanokwan somsri<br/>เป็นผู้ดูแลระบบ?"}
     F3 -- "✅ พบ" --> G["📝 เข้าหน้าบันทึกค่าใช้จ่าย"]
     F3 -- "❌ ไม่พบ" --> F4["❌ หยุดการทำงาน<br/>แจ้งเตือน: ไม่พบสิทธิ์ผู้ดูแล"]
@@ -51,10 +51,17 @@ flowchart TD
 
     I3["➕ สร้างผู้ติดต่อใหม่<br/>กรอกเลขภาษี 13 ช่อง<br/>เลือกสาขา → ค้นหา กรมพัฒน์<br/>กรอกที่อยู่ → กดเพิ่ม"]
 
-    I2 --> J
-    I3 --> J
+    I2 --> J_CHECK
+    I3 --> J_CHECK
 
-    J["📋 กรอกข้อมูลบิล<br/>วันที่ + เลขที่ใบกำกับภาษี"] --> K
+    J_CHECK{"ตรวจประเภทบริษัท<br/>+ ยอดภาษีมูลค่าเพิ่ม"}
+    J_CHECK -- "NoneVat<br/>ไม่จด VAT" --> J_SKIP["📝 กรอกวันที่เท่านั้น<br/>ข้ามเลขที่ใบกำกับภาษี"]
+    J_CHECK -- "VAT แต่ยอดภาษี = 0" --> J_SKIP
+    J_CHECK -- "VAT + ยอดภาษี > 0" --> J["📋 กรอกข้อมูลบิล<br/>วันที่ + เลขที่ใบกำกับภาษี"]
+    J_SKIP --> K
+    J --> K
+
+    J_CHECK -.- J_NOTE["📌 กฎการข้ามเลขที่เอกสาร:<br/>1. Sheet ไม่มีภาษีฯ → ข้ามเสมอ<br/>2. Sheet มีภาษีฯ + ยอดภาษี=0 → ข้าม<br/>3. Sheet มีภาษีฯ + ยอดภาษี>0 → กรอก"]
 
     K["🔁 วนลูปรายการสินค้า"] --> K1["กรอกโค้ดบันทึกบัญชี"]
     K1 --> K2["ตั้งประเภทราคา = รวมภาษี"]
@@ -166,4 +173,7 @@ flowchart TD
     style PAY_TXT1 fill:#3b82f6,color:#fff,stroke:none
     style PAY_AMT_NOTE fill:#1e293b,color:#94a3b8,stroke:#334155,stroke-dasharray:5
     style PAY5 fill:#22c55e,color:#fff,stroke:none
+    style J_CHECK fill:#f59e0b,color:#000,stroke:none
+    style J_SKIP fill:#fb923c,color:#fff,stroke:none
+    style J_NOTE fill:#1e293b,color:#94a3b8,stroke:#334155,stroke-dasharray:5
 ```

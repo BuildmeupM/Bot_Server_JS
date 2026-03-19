@@ -35,8 +35,8 @@ async function parseExcelData(excelPath, addLog, jobId) {
         return [];
     };
 
-    const vatTransactions = getSheetData('มีภาษีมูลค่าเพิ่ม');
-    const nonVatTransactions = getSheetData('ไม่มีภาษีมูลค่าเพิ่ม');
+    const vatTransactions = getSheetData('มีภาษีมูลค่าเพิ่ม').map(tx => ({ ...tx, _sheetType: 'VAT' }));
+    const nonVatTransactions = getSheetData('ไม่มีภาษีมูลค่าเพิ่ม').map(tx => ({ ...tx, _sheetType: 'NoneVat' }));
     const vendors = getSheetData('ที่อยู่แต่ละบริษัท');
     const allTransactions = [...vatTransactions, ...nonVatTransactions];
 

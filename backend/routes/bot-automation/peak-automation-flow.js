@@ -1,4 +1,4 @@
-const { getExcelVal } = require('./excel-parser');
+// const { getExcelVal } = require('./excel-parser');
 
 /**
  * Core PEAK automation flow — company navigation, vendor handling,
@@ -107,7 +107,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
         const rawVendorName = primaryTx["ชื่อบริษัท - ผู้ขาย"] || "ไม่ระบุชื่อ";
         const taxId = String(primaryTx["เลขประจำตัวผู้เสียภาษี"] || "").trim();
         const branch = String(primaryTx["สาขา"] || "").trim();
-        const totalAmount = primaryTx["ยอดรวมสุทธิ"] || "0.00";
+        // const totalAmount = primaryTx["ยอดรวมสุทธิ"] || "0.00";
 
         addLog(job.id, "info", `▶️ เลขที่เอกสาร: ${primaryTx["เลขที่เอกสาร"]}`);
         addLog(job.id, "info", `▶️ ผู้ขาย: ${rawVendorName} | เลขภาษี: ${taxId}`);
@@ -397,7 +397,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
             addLog(job.id, "info", "⏳ รอ Modal เพิ่มผู้ติดต่อโหลด...");
             try {
                 await page.locator('input.inputId').first().waitFor({ state: 'visible', timeout: 15000 });
-            } catch (modalWaitErr) {
+            } catch (_modalWaitErr) {
                 addLog(job.id, "warn", `⚠️ Modal ไม่ปรากฏภายใน 15 วิ — ลองคลิก 'เพิ่มผู้ติดต่อ' อีกครั้ง...`);
                 // ปิด Dropdown ก่อนแล้วลองคลิกใหม่
                 await page.keyboard.press('Escape');
@@ -622,7 +622,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
                 try {
                   // หา Container ของ "ที่อยู่จดทะเบียน" เพื่อหากดปุ่ม ย่อ/ขยาย ที่ถูกต้อง
                   addLog(job.id, "info", `🗂️ ฟอร์มที่อยู่ถูกย่ออยู่ กำลังกางออก...`);
-                  const addressHeader = modalContent.locator('text="ที่อยู่จดทะเบียน"').first();
+                  // const addressHeader = modalContent.locator('text="ที่อยู่จดทะเบียน"').first();
                   // มักจะอยู่ใน block ควบคู่กัน หรือใช้ .first() เป็น fallback
                   const expandBtn = modalContent.locator('text="ย่อ/ขยาย"').first();
                   
@@ -916,8 +916,31 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
           }
           
           // 2. เลขที่เอกสาร (Tax Invoice No / Document No) (ทำครั้งเดียวต่อบิล)
+          // ── ตรวจสอบประเภทบริษัท (จด VAT / ไม่จด VAT) ก่อนกรอกเลขที่เอกสาร ──
+          const sheetType = primaryTx._sheetType || 'VAT'; // default เป็น VAT ถ้าไม่มี tag (backward compat)
           const docNo = primaryTx["เลขที่เอกสาร"];
-          if (docNo) {
+
+          // ดึงยอดภาษีมูลค่าเพิ่มจาก primaryTx (ใช้ flexible key matching เหมือนส่วนอื่น)
+          const vatAmtKey = Object.keys(primaryTx).find(k => k.replace(/[\n\r\s]/g, '').includes('ยอดภาษีมูลค่าเพิ่ม'));
+          const vatAmtRaw = vatAmtKey ? primaryTx[vatAmtKey] : undefined;
+          const vatAmtVal = parseFloat(String(vatAmtRaw || '0').replace(/,/g, '').trim());
+
+          // กฎ: ข้ามเลขที่เอกสารเมื่อ
+          // 1. Sheet = "ไม่มีภาษีมูลค่าเพิ่ม" (NoneVat) → ไม่ใช่บริษัทจด VAT → ไม่มีใบกำกับภาษี
+          // 2. Sheet = "มีภาษีมูลค่าเพิ่ม" (VAT) แต่ยอดภาษี = 0 หรือว่าง → ข้ามเลขที่เอกสาร
+          const shouldSkipDocNo = sheetType === 'NoneVat' || (sheetType === 'VAT' && (isNaN(vatAmtVal) || vatAmtVal <= 0));
+
+          if (shouldSkipDocNo) {
+              const reason = sheetType === 'NoneVat'
+                  ? 'บริษัทไม่จดภาษีมูลค่าเพิ่ม (Sheet: ไม่มีภาษีมูลค่าเพิ่ม)'
+                  : `บริษัทจดภาษีมูลค่าเพิ่ม แต่ยอดภาษี = ${vatAmtRaw || '(ว่าง)'} (ข้ามเลขที่เอกสาร)`;
+              addLog(job.id, "info", `📝 ข้ามขั้นตอนกรอกเลขที่ใบกำกับภาษี — ${reason}`);
+              // คลิกพื้นที่ว่างบนหน้าจอ เพื่อให้ focus ย้ายออกจากช่องวันที่ และ Vue อัปเดทสถานะ
+              try {
+                  await page.locator('body').click({ position: { x: 10, y: 10 }, force: true });
+                  await page.waitForTimeout(500);
+              } catch (e) {}
+          } else if (docNo) {
               const docNoStr = String(docNo).trim();
               addLog(job.id, "info", `📝 กำลังกรอกเลขที่ใบกำกับภาษี: ${docNoStr}...`);
               const taxInvInput = page.getByPlaceholder("ระบุเลขที่ใบกำกับภาษี").first();
@@ -977,6 +1000,8 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
           }
           
           // --- วนลูปกรอกรายการสินค้า/บัญชี ภายในบิลนี้ ---
+
+          
           for (let itemIdx = 0; itemIdx < docGroup.length; itemIdx++) {
             const itemTx = docGroup[itemIdx];
             const displayRowNum = itemIdx + 1;
@@ -1000,11 +1025,15 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
               addLog(job.id, "info", `📦 ค้นหาและระบุ โค้ดบันทึกบัญชี: ${accCode} (รายการที่ ${displayRowNum})`);
               
               // Scroll ลงไปที่ตาราง "รายการ" ก่อน เพื่อบังคับให้ Vue render element ออกมา
-              const itemsSection = page.getByText("รายการ").first();
+              addLog(job.id, "info", `📜 เลื่อนหน้าจอลงไปยังตาราง "รายการ"...`);
               try {
-                  await itemsSection.scrollIntoViewIfNeeded();
-                  await page.waitForTimeout(200);
-              } catch(e) {}
+                  await page.evaluate(() => {
+                      const el = document.querySelector('input[placeholder*="บัญชี/ค่าใช้จ่าย"], input[placeholder*="รหัสบัญชี"]');
+                      if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+                      else window.scrollBy(0, 1200);
+                  });
+                  await page.waitForTimeout(500);
+              } catch(e) { await page.evaluate(() => window.scrollBy(0, 1200)); await page.waitForTimeout(500); }
               
               // หา Input หรือ Container ที่มองเห็นได้
               let triggerElement = null;
@@ -1032,7 +1061,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
               if (found && triggerElement) {
                   try {
                       // 1. คลิกที่ Trigger เพื่อเปิด Dropdown
-                      await triggerElement.scrollIntoViewIfNeeded();
+                      await triggerElement.evaluate(el => el.scrollIntoView({ block: 'center', behavior: 'instant' }));
                       await triggerElement.click({ force: true });
                       await page.waitForTimeout(400); // รอให้ Vue Active + กาง DOM
                       
@@ -1204,7 +1233,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
                               await page.waitForTimeout(300); // รอ DOM กาง
                               
                               // หาและคลิกตัวเลือก 7% หรือ ไม่มี ภายใน dropdown ของ div เดียวกัน (.selectInputDropdown)
-                              const dropdownArea = vatContainer.locator('.selectInputDropdown').first();
+                              // const dropdownArea = vatContainer.locator('.selectInputDropdown').first();
                               
                               // ใน PEAK Dropdown แบบใหม่บางทีต้องมองหา li หรือ dropdown content
                               // แต่เนื่องจากเรากดเปิด container ไปแล้ว ตัวเลือกโผล่ในหน้าต่าง 
@@ -1462,7 +1491,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
                           }
 
                           // คลิกปุ่ม "ตัวเลือก" (หลาย selector fallback)
-                          let optionsClicked = false;
+                          // let optionsClicked = false;
                           const optSelectors = [
                               page.locator('div.buttonNotDefaultOption p', { hasText: 'ตัวเลือก' }).first(),
                               page.getByText('ตัวเลือก', { exact: true }).first(),
@@ -1473,7 +1502,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
                                   if (await optBtn.isVisible({ timeout: 2000 })) {
                                       await optBtn.scrollIntoViewIfNeeded();
                                       await optBtn.click({ force: true });
-                                      optionsClicked = true;
+                                      // optionsClicked = true;
                                       break;
                                   }
                               } catch (e) {}
@@ -1675,7 +1704,7 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
                                               uploaded = true;
                                               addLog(job.id, 'info', `📤 อัปโหลดผ่านปุ่ม "เพิ่มไฟล์ใหม่" (วิธี 2)`);
                                           }
-                                      } catch (fcErr) {}
+                                      } catch (_fcErr) {}
                                   }
                                   
                                   if (uploaded) {

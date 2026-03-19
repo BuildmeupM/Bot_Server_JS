@@ -14,12 +14,43 @@ export default function OcrBuildReportPage() {
     const [confirmDelete, setConfirmDelete] = useState(null)
     const [exportLoading, setExportLoading] = useState(false)
 
+    // ── Export Filter Modal state ──
+    const [showExportModal, setShowExportModal] = useState(false)
+    const [exportDateFrom, setExportDateFrom] = useState('')
+    const [exportDateTo, setExportDateTo] = useState('')
+    const [exportDocTypes, setExportDocTypes] = useState([])
+
+    const applyDatePreset = (preset) => {
+        const now = new Date()
+        if (preset === 'all') {
+            setExportDateFrom(''); setExportDateTo('')
+        } else if (preset === 'thisMonth') {
+            const y = now.getFullYear(), m = String(now.getMonth() + 1).padStart(2, '0')
+            setExportDateFrom(`${y}-${m}-01`)
+            setExportDateTo(`${y}-${m}-${new Date(y, now.getMonth() + 1, 0).getDate()}`)
+        } else if (preset === 'lastMonth') {
+            const d = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+            const y = d.getFullYear(), m = String(d.getMonth() + 1).padStart(2, '0')
+            setExportDateFrom(`${y}-${m}-01`)
+            setExportDateTo(`${y}-${m}-${new Date(y, d.getMonth() + 1, 0).getDate()}`)
+        }
+    }
+
+    const toggleDocType = (type) => {
+        setExportDocTypes(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type])
+    }
+
+    const openExportModal = () => {
+        setShowExportModal(true)
+        setExportDateFrom(''); setExportDateTo(''); setExportDocTypes([])
+    }
+
     useEffect(() => { fetchReport() }, [code])
 
     const fetchReport = async () => {
         setLoading(true)
         try {
-            const res = await fetch(`http://localhost:4000/api/ocr/build-report/${encodeURIComponent(code)}`)
+            const res = await fetch(`/api/ocr/build-report/${encodeURIComponent(code)}`)
             const data = await res.json()
             setReport(data)
         } catch (err) {
@@ -29,7 +60,7 @@ export default function OcrBuildReportPage() {
 
     const handleDelete = async (id) => {
         try {
-            const res = await fetch(`http://localhost:4000/api/ocr/history/${id}`, { method: 'DELETE' })
+            const res = await fetch(`/api/ocr/history/${id}`, { method: 'DELETE' })
             const data = await res.json()
             if (data.success) {
                 setSelectedFile(null)
@@ -47,7 +78,12 @@ export default function OcrBuildReportPage() {
     const handleExportExcel = async () => {
         setExportLoading(true)
         try {
-            const res = await fetch(`http://localhost:4000/api/ocr/export-excel/${encodeURIComponent(code)}`)
+            const params = new URLSearchParams()
+            if (exportDateFrom) params.set('dateFrom', exportDateFrom)
+            if (exportDateTo) params.set('dateTo', exportDateTo)
+            if (exportDocTypes.length > 0) params.set('docType', exportDocTypes.join(','))
+            const qs = params.toString() ? `?${params.toString()}` : ''
+            const res = await fetch(`/api/ocr/export-excel/${encodeURIComponent(code)}${qs}`)
             if (!res.ok) {
                 const err = await res.json()
                 alert('ส่งออกไม่สำเร็จ: ' + (err.error || 'Unknown error'))
@@ -57,11 +93,14 @@ export default function OcrBuildReportPage() {
             const url = URL.createObjectURL(blob)
             const a = document.createElement('a')
             a.href = url
-            a.download = `OCR_Export_${code}_${new Date().toISOString().slice(0,10)}.xlsx`
+            const cd = res.headers.get('Content-Disposition')
+            const match = cd && cd.match(/filename="?([^"]+)"?/)
+            a.download = match ? decodeURIComponent(match[1]) : `OCR_Export_${code}_${new Date().toISOString().slice(0,10)}.xlsx`
             document.body.appendChild(a)
             a.click()
             a.remove()
             URL.revokeObjectURL(url)
+            setShowExportModal(false)
         } catch (err) {
             console.error('Export error:', err)
             alert('เกิดข้อผิดพลาดในการส่งออก')
@@ -104,7 +143,7 @@ export default function OcrBuildReportPage() {
                             background: 'rgba(255,255,255,0.2)', padding: '5px 16px', borderRadius: 8,
                             fontFamily: "'JetBrains Mono', monospace", backdropFilter: 'blur(4px)'
                         }}>{code}</span>
-                        <button onClick={handleExportExcel} disabled={exportLoading} style={{
+                        <button onClick={openExportModal} disabled={exportLoading} style={{
                             background: exportLoading ? 'rgba(255,255,255,0.1)' : 'rgba(34,197,94,0.9)',
                             border: 'none', borderRadius: 8,
                             padding: '8px 18px', color: '#fff', cursor: exportLoading ? 'wait' : 'pointer',
@@ -589,6 +628,129 @@ export default function OcrBuildReportPage() {
                     </div>
                 )
             })()}
+
+            {/* ══════ EXPORT FILTER MODAL ══════ */}
+            {showExportModal && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.5)', zIndex: 1000,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    animation: 'fadeIn .2s ease'
+                }} onClick={() => setShowExportModal(false)}>
+                    <div style={{
+                        background: '#fff', borderRadius: 20, width: '90%', maxWidth: 520,
+                        overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,0.2)',
+                        animation: 'slideUp .25s ease'
+                    }} onClick={e => e.stopPropagation()}>
+                        {/* Header */}
+                        <div style={{
+                            background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                            padding: '18px 24px', color: '#fff',
+                            display: 'flex', alignItems: 'center', gap: 10
+                        }}>
+                            <span style={{ fontSize: 22 }}>📥</span>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 16, fontWeight: 800 }}>ส่งออก Excel</div>
+                                <div style={{ fontSize: 12, opacity: 0.85 }}>เลือกเงื่อนไขที่ต้องการส่งออก — {code}</div>
+                            </div>
+                            <button onClick={() => setShowExportModal(false)} style={{
+                                background: 'rgba(255,255,255,0.15)', border: 'none',
+                                fontSize: 18, cursor: 'pointer', color: '#fff', padding: '4px 10px',
+                                borderRadius: 8
+                            }}>✕</button>
+                        </div>
+                        {/* Body */}
+                        <div style={{ padding: '20px 24px' }}>
+                            {/* Quick Presets */}
+                            <div style={{ marginBottom: 20 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', marginBottom: 8 }}>⚡ ตัวเลือกด่วน</div>
+                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                    {[
+                                        { id: 'all', label: '📋 ทั้งหมด', active: !exportDateFrom && !exportDateTo },
+                                        { id: 'thisMonth', label: '📅 เดือนนี้', active: false },
+                                        { id: 'lastMonth', label: '📅 เดือนที่แล้ว', active: false },
+                                    ].map(p => (
+                                        <button key={p.id} onClick={() => applyDatePreset(p.id)}
+                                            style={{
+                                                padding: '8px 16px', border: '1.5px solid',
+                                                borderColor: p.active ? '#22c55e' : '#e2e8f0',
+                                                borderRadius: 10, background: p.active ? '#f0fdf4' : '#fff',
+                                                color: p.active ? '#16a34a' : '#64748b',
+                                                fontSize: 12, fontWeight: 600, cursor: 'pointer', transition: 'all .15s'
+                                            }}>{p.label}</button>
+                                    ))}
+                                </div>
+                            </div>
+                            {/* Date Range */}
+                            <div style={{ marginBottom: 20 }}>
+                                <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', marginBottom: 8 }}>📅 ช่วงวันที่</div>
+                                <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                                    <input type="date" value={exportDateFrom}
+                                        onChange={e => setExportDateFrom(e.target.value)}
+                                        style={{ flex: 1, padding: '10px 14px', borderRadius: 10, border: '1.5px solid #e2e8f0', fontSize: 13, outline: 'none' }}
+                                    />
+                                    <span style={{ fontSize: 13, color: '#94a3b8', fontWeight: 600 }}>ถึง</span>
+                                    <input type="date" value={exportDateTo}
+                                        onChange={e => setExportDateTo(e.target.value)}
+                                        style={{ flex: 1, padding: '10px 14px', borderRadius: 10, border: '1.5px solid #e2e8f0', fontSize: 13, outline: 'none' }}
+                                    />
+                                </div>
+                                {!exportDateFrom && !exportDateTo && (
+                                    <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>ไม่ระบุ = ส่งออกทั้งหมด</div>
+                                )}
+                            </div>
+                            {/* Document Types */}
+                            {report?.docTypes && report.docTypes.length > 0 && (
+                                <div style={{ marginBottom: 20 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 700, color: '#475569', marginBottom: 8 }}>📋 ประเภทเอกสาร</div>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        {report.docTypes.map((dt, i) => {
+                                            const sel = exportDocTypes.includes(dt.type)
+                                            return (
+                                                <button key={i} onClick={() => toggleDocType(dt.type)}
+                                                    style={{
+                                                        padding: '6px 14px', border: '1.5px solid',
+                                                        borderColor: sel ? '#3b82f6' : '#e2e8f0',
+                                                        borderRadius: 10, background: sel ? '#eff6ff' : '#fff',
+                                                        color: sel ? '#2563eb' : '#64748b',
+                                                        fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                                                        transition: 'all .15s', display: 'flex', alignItems: 'center', gap: 4
+                                                    }}>
+                                                    {sel ? '✅' : '⬜'} {dt.type} ({dt.count})
+                                                </button>
+                                            )
+                                        })}
+                                    </div>
+                                    {exportDocTypes.length === 0 && (
+                                        <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 6 }}>ไม่เลือก = ส่งออกทุกประเภท</div>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                        {/* Footer */}
+                        <div style={{
+                            padding: '14px 24px', borderTop: '1px solid #e5e7eb',
+                            display: 'flex', justifyContent: 'flex-end', gap: 10, background: '#f8fafc'
+                        }}>
+                            <button onClick={() => setShowExportModal(false)} style={{
+                                padding: '10px 20px', border: '1.5px solid #e2e8f0', borderRadius: 10,
+                                background: '#fff', color: '#64748b', fontSize: 13, fontWeight: 600, cursor: 'pointer'
+                            }}>ยกเลิก</button>
+                            <button onClick={handleExportExcel} disabled={exportLoading}
+                                style={{
+                                    padding: '10px 24px', border: 'none', borderRadius: 10,
+                                    background: exportLoading ? '#94a3b8' : 'linear-gradient(135deg, #22c55e, #16a34a)',
+                                    color: '#fff', fontSize: 13, fontWeight: 700,
+                                    cursor: exportLoading ? 'not-allowed' : 'pointer',
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    boxShadow: '0 4px 12px rgba(34,197,94,0.3)'
+                                }}>
+                                {exportLoading ? '⏳ กำลังส่งออก...' : '📥 ส่งออก Excel'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <style>{`
                 @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }

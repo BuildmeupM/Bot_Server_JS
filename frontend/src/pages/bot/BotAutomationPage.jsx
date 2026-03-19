@@ -123,7 +123,7 @@ export default function BotAutomationPage() {
     const checkApiHealth = async () => {
         setCheckingApi(true)
         try {
-            const res = await fetch('http://localhost:4000/api/ocr/health')
+            const res = await fetch('/api/ocr/health')
             const data = await res.json()
             setApiHealth(data)
         } catch (err) {

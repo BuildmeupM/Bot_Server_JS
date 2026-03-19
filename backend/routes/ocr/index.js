@@ -579,14 +579,83 @@ router.delete('/history/:id', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════
-// GET /api/ocr/export-excel/:buildCode — ส่งออก Excel
+// GET /api/ocr/export-excel/:buildCode — ส่งออก Excel (รองรับ filter)
+// Query params: dateFrom, dateTo, docType, status, fileNames
 // ══════════════════════════════════════════════
 router.get('/export-excel/:buildCode', async (req, res) => {
     try {
         const pool = getPool();
         const buildCode = req.params.buildCode;
+        const { dateFrom, dateTo, docType, status, fileNames, folderPath } = req.query;
 
-        // Query OCR records for this build code (deduplicate by file_name — เอาเฉพาะรายการล่าสุด)
+        // Build dynamic WHERE conditions
+        const conditions = ['build_code = ?'];
+        const params = [buildCode];
+
+        // Default: only 'done' records, unless status is explicitly set
+        if (status) {
+            conditions.push('status = ?');
+            params.push(status);
+        } else {
+            conditions.push("status = 'done'");
+        }
+
+        if (dateFrom) {
+            conditions.push('DATE(created_at) >= ?');
+            params.push(dateFrom);
+        }
+        if (dateTo) {
+            conditions.push('DATE(created_at) <= ?');
+            params.push(dateTo);
+        }
+        if (docType) {
+            const types = docType.split(',').map(t => t.trim()).filter(Boolean);
+            if (types.length > 0) {
+                conditions.push(`document_type IN (${types.map(() => '?').join(',')})`);
+                params.push(...types);
+            }
+        }
+        if (fileNames) {
+            try {
+                const names = JSON.parse(decodeURIComponent(fileNames));
+                if (Array.isArray(names) && names.length > 0) {
+                    conditions.push(`file_name IN (${names.map(() => '?').join(',')})`);
+                    params.push(...names);
+                }
+            } catch (e) {
+                // Fallback: comma-separated
+                const names = fileNames.split(',').map(n => n.trim()).filter(Boolean);
+                if (names.length > 0) {
+                    conditions.push(`file_name IN (${names.map(() => '?').join(',')})`);
+                    params.push(...names);
+                }
+            }
+        }
+        // folderPath — อ่านชื่อไฟล์ PDF จาก folder แล้วเทียบ
+        if (folderPath && fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
+            const folderFiles = [];
+            const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
+                    folderFiles.push(entry.name);
+                } else if (entry.isDirectory()) {
+                    try {
+                        const subEntries = fs.readdirSync(path.join(folderPath, entry.name), { withFileTypes: true });
+                        for (const sub of subEntries) {
+                            if (sub.isFile() && /\.pdf$/i.test(sub.name)) folderFiles.push(sub.name);
+                        }
+                    } catch (e) { /* skip */ }
+                }
+            }
+            if (folderFiles.length > 0) {
+                conditions.push(`file_name IN (${folderFiles.map(() => '?').join(',')})`);
+                params.push(...folderFiles);
+            }
+        }
+
+        const whereClause = conditions.join(' AND ');
+
+        // Query OCR records (deduplicate by file_name — เอาเฉพาะรายการล่าสุด)
         const [records] = await pool.query(
             `SELECT h.id, h.file_name, h.file_path, h.document_type, h.document_number, h.document_date,
                     h.seller_name, h.seller_tax_id, h.seller_branch, h.seller_address, h.buyer_name, h.buyer_tax_id, h.buyer_address,
@@ -594,15 +663,15 @@ router.get('/export-excel/:buildCode', async (req, res) => {
              FROM ocr_history h
              INNER JOIN (
                  SELECT MAX(id) as max_id FROM ocr_history 
-                 WHERE build_code = ? AND status = 'done'
+                 WHERE ${whereClause}
                  GROUP BY file_name
              ) latest ON h.id = latest.max_id
              ORDER BY h.created_at ASC`,
-            [buildCode]
+            params
         );
 
         if (records.length === 0) {
-            return res.status(404).json({ error: 'ไม่พบข้อมูล OCR สำหรับ build code นี้' });
+            return res.status(404).json({ error: 'ไม่พบข้อมูล OCR สำหรับเงื่อนไขที่เลือก' });
         }
 
         // Get company addresses from companies_master
@@ -621,7 +690,8 @@ router.get('/export-excel/:buildCode', async (req, res) => {
         const workbook = await buildExcelWorkbook(records, companiesMap);
 
         // Stream as download
-        const fileName = `OCR_Export_${buildCode}_${new Date().toISOString().slice(0,10)}.xlsx`;
+        const dateSuffix = dateFrom && dateTo ? `_${dateFrom}_to_${dateTo}` : '';
+        const fileName = `OCR_Export_${buildCode}${dateSuffix}_${new Date().toISOString().slice(0,10)}.xlsx`;
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
 
@@ -629,6 +699,244 @@ router.get('/export-excel/:buildCode', async (req, res) => {
         res.end();
     } catch (err) {
         console.error('Export Excel error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ══════════════════════════════════════════════
+// GET /api/ocr/export-excel-all — ส่งออก Excel ทุก record (ไม่จำกัด build code)
+// Query params: dateFrom, dateTo, docType
+// ══════════════════════════════════════════════
+router.get('/export-excel-all', async (req, res) => {
+    try {
+        const pool = getPool();
+        const { dateFrom, dateTo, docType } = req.query;
+
+        const conditions = ["status = 'done'"];
+        const params = [];
+
+        if (dateFrom) {
+            conditions.push('DATE(created_at) >= ?');
+            params.push(dateFrom);
+        }
+        if (dateTo) {
+            conditions.push('DATE(created_at) <= ?');
+            params.push(dateTo);
+        }
+        if (docType) {
+            const types = docType.split(',').map(t => t.trim()).filter(Boolean);
+            if (types.length > 0) {
+                conditions.push(`document_type IN (${types.map(() => '?').join(',')})`);
+                params.push(...types);
+            }
+        }
+
+        const whereClause = conditions.join(' AND ');
+
+        const [records] = await pool.query(
+            `SELECT h.id, h.file_name, h.file_path, h.document_type, h.document_number, h.document_date,
+                    h.seller_name, h.seller_tax_id, h.seller_branch, h.seller_address, h.buyer_name, h.buyer_tax_id, h.buyer_address,
+                    h.subtotal, h.vat, h.total, h.status, h.created_at
+             FROM ocr_history h
+             INNER JOIN (
+                 SELECT MAX(id) as max_id FROM ocr_history
+                 WHERE ${whereClause}
+                 GROUP BY file_name
+             ) latest ON h.id = latest.max_id
+             ORDER BY h.created_at ASC`,
+            params
+        );
+
+        if (records.length === 0) {
+            return res.status(404).json({ error: 'ไม่พบข้อมูล OCR สำหรับเงื่อนไขที่เลือก' });
+        }
+
+        const taxIds = [...new Set(records.map(r => r.seller_tax_id).filter(Boolean))];
+        const companiesMap = {};
+        if (taxIds.length > 0) {
+            const placeholders = taxIds.map(() => '?').join(',');
+            const [companies] = await pool.query(
+                `SELECT tax_id, name_th, name_en, address FROM companies_master WHERE tax_id IN (${placeholders})`,
+                taxIds
+            );
+            companies.forEach(c => { companiesMap[c.tax_id] = c; });
+        }
+
+        const workbook = await buildExcelWorkbook(records, companiesMap);
+
+        const dateSuffix = dateFrom && dateTo ? `_${dateFrom}_to_${dateTo}` : '';
+        const fileName = `OCR_Export_All${dateSuffix}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (err) {
+        console.error('Export Excel All error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ══════════════════════════════════════════════
+// POST /api/ocr/list-folder-files — อ่านชื่อไฟล์จาก folder path และเทียบกับ DB
+// Body: { folderPath: "C:\\path\\to\\folder" }
+// ══════════════════════════════════════════════
+router.post('/list-folder-files', async (req, res) => {
+    try {
+        const { folderPath } = req.body;
+        if (!folderPath) {
+            return res.status(400).json({ error: 'กรุณาระบุ folderPath' });
+        }
+
+        // ตรวจสอบว่า folder มีอยู่จริง
+        if (!fs.existsSync(folderPath)) {
+            return res.status(404).json({ error: `ไม่พบโฟลเดอร์: ${folderPath}` });
+        }
+
+        const stat = fs.statSync(folderPath);
+        if (!stat.isDirectory()) {
+            return res.status(400).json({ error: 'Path ที่ระบุไม่ใช่โฟลเดอร์' });
+        }
+
+        // อ่านไฟล์ PDF ใน folder (รวม subfolder 1 ชั้น)
+        const allFiles = [];
+        const readDir = (dir) => {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
+                    allFiles.push(entry.name);
+                } else if (entry.isDirectory()) {
+                    // อ่าน subfolder อีก 1 ชั้น
+                    const subDir = path.join(dir, entry.name);
+                    try {
+                        const subEntries = fs.readdirSync(subDir, { withFileTypes: true });
+                        for (const sub of subEntries) {
+                            if (sub.isFile() && /\.pdf$/i.test(sub.name)) {
+                                allFiles.push(sub.name);
+                            }
+                        }
+                    } catch (e) { /* skip unreadable subdirs */ }
+                }
+            }
+        };
+        readDir(folderPath);
+
+        if (allFiles.length === 0) {
+            return res.json({ totalInFolder: 0, matched: 0, unmatched: 0, files: [] });
+        }
+
+        // เทียบกับ DB
+        const pool = getPool();
+        const placeholders = allFiles.map(() => '?').join(',');
+        const [dbRows] = await pool.query(
+            `SELECT file_name FROM ocr_history WHERE file_name IN (${placeholders}) AND status = 'done' GROUP BY file_name`,
+            allFiles
+        );
+        const matchedSet = new Set(dbRows.map(r => r.file_name));
+
+        const files = allFiles.map(f => ({
+            name: f,
+            matched: matchedSet.has(f)
+        }));
+
+        res.json({
+            totalInFolder: allFiles.length,
+            matched: files.filter(f => f.matched).length,
+            unmatched: files.filter(f => !f.matched).length,
+            files
+        });
+    } catch (err) {
+        console.error('List folder files error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ══════════════════════════════════════════════
+// POST /api/ocr/export-excel-by-folder — ส่งออก Excel จากชื่อไฟล์ใน folder
+// Body: { folderPath: "C:\\path\\to\\folder" }
+// ══════════════════════════════════════════════
+router.post('/export-excel-by-folder', async (req, res) => {
+    try {
+        const { folderPath } = req.body;
+        if (!folderPath) {
+            return res.status(400).json({ error: 'กรุณาระบุ folderPath' });
+        }
+
+        if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+            return res.status(404).json({ error: `ไม่พบโฟลเดอร์: ${folderPath}` });
+        }
+
+        // อ่านไฟล์ PDF ใน folder (รวม subfolder 1 ชั้น)
+        const allFiles = [];
+        const readDir = (dir) => {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+                if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
+                    allFiles.push(entry.name);
+                } else if (entry.isDirectory()) {
+                    const subDir = path.join(dir, entry.name);
+                    try {
+                        const subEntries = fs.readdirSync(subDir, { withFileTypes: true });
+                        for (const sub of subEntries) {
+                            if (sub.isFile() && /\.pdf$/i.test(sub.name)) {
+                                allFiles.push(sub.name);
+                            }
+                        }
+                    } catch (e) { /* skip */ }
+                }
+            }
+        };
+        readDir(folderPath);
+
+        if (allFiles.length === 0) {
+            return res.status(404).json({ error: 'ไม่พบไฟล์ PDF ในโฟลเดอร์ที่ระบุ' });
+        }
+
+        // ดึงข้อมูลจาก DB เฉพาะไฟล์ที่ match
+        const pool = getPool();
+        const placeholders = allFiles.map(() => '?').join(',');
+        const [records] = await pool.query(
+            `SELECT h.id, h.file_name, h.file_path, h.document_type, h.document_number, h.document_date,
+                    h.seller_name, h.seller_tax_id, h.seller_branch, h.seller_address, h.buyer_name, h.buyer_tax_id, h.buyer_address,
+                    h.subtotal, h.vat, h.total, h.status, h.created_at
+             FROM ocr_history h
+             INNER JOIN (
+                 SELECT MAX(id) as max_id FROM ocr_history
+                 WHERE file_name IN (${placeholders}) AND status = 'done'
+                 GROUP BY file_name
+             ) latest ON h.id = latest.max_id
+             ORDER BY h.created_at ASC`,
+            allFiles
+        );
+
+        if (records.length === 0) {
+            return res.status(404).json({ error: `ไม่พบข้อมูล OCR ที่ตรงกับไฟล์ใน folder (${allFiles.length} ไฟล์ PDF)` });
+        }
+
+        // Company addresses
+        const taxIds = [...new Set(records.map(r => r.seller_tax_id).filter(Boolean))];
+        const companiesMap = {};
+        if (taxIds.length > 0) {
+            const ph = taxIds.map(() => '?').join(',');
+            const [companies] = await pool.query(
+                `SELECT tax_id, name_th, name_en, address FROM companies_master WHERE tax_id IN (${ph})`,
+                taxIds
+            );
+            companies.forEach(c => { companiesMap[c.tax_id] = c; });
+        }
+
+        const workbook = await buildExcelWorkbook(records, companiesMap);
+
+        // ใช้ชื่อ folder เป็นชื่อไฟล์ Excel
+        const folderName = path.basename(folderPath).replace(/[^\w\u0E00-\u0E7F\s\-_]/g, '');
+        const fileName = `OCR_Export_${folderName || 'Folder'}_${new Date().toISOString().slice(0, 10)}.xlsx`;
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileName)}"`);
+
+        await workbook.xlsx.write(res);
+        res.end();
+    } catch (err) {
+        console.error('Export Excel by folder error:', err);
         res.status(500).json({ error: err.message });
     }
 });

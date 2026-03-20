@@ -333,7 +333,7 @@ function parseAddress(fullAddress) {
     if (roadMatch) result.road = roadMatch[1];
 
     // Number (เลขที่ at start)
-    const numMatch = addr.match(/^(\d+[\/\-]?\d*)/);
+    const numMatch = addr.match(/^(\d+[/-]?\d*)/);
     if (numMatch) result.number = numMatch[1];
 
     return result;
@@ -405,9 +405,40 @@ function styleHeaderRow(sheet) {
     });
 }
 
-function addDataRows(sheet, rows) {
+const RED_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEE2E2' } };
+const RED_FONT_EXTRA = { color: { argb: 'FFDC2626' }, bold: true };
+
+// ตรวจ Tax ID: ต้อง 13 หลักตัวเลข
+function isTaxIdInvalid(taxId, isCustoms) {
+    if (isCustoms) return false; // ยกเว้นกรมศุลกากร
+    if (!taxId) return false; // ไม่ได้กรอก = ไม่ highlight
+    const digits = String(taxId).replace(/\D/g, '');
+    return digits.length !== 13;
+}
+
+// ตรวจวันที่: ปีต้องไม่ห่างจากปัจจุบันเกิน 2 ปี
+function isDateSuspicious(dateStr) {
+    if (!dateStr) return false;
+    // รองรับ dd/mm/yyyy หรือ yyyy-mm-dd
+    let year = null;
+    const slashMatch = String(dateStr).match(/(\d{1,2})[/-](\d{1,2})[/-](\d{4})/);
+    if (slashMatch) {
+        year = parseInt(slashMatch[3]);
+    } else {
+        const isoMatch = String(dateStr).match(/(\d{4})[/-](\d{1,2})[/-](\d{1,2})/);
+        if (isoMatch) year = parseInt(isoMatch[1]);
+    }
+    if (!year) return false;
+    // แปลงพ.ศ. → ค.ศ. ถ้าเกิน 2400
+    if (year > 2400) year -= 543;
+    const currentYear = new Date().getFullYear();
+    return Math.abs(year - currentYear) > 2;
+}
+
+function addDataRows(sheet, rows, rowMeta) {
     rows.forEach((rowData, idx) => {
         const row = sheet.addRow(rowData);
+        const meta = rowMeta ? rowMeta[idx] : null;
         row.eachCell(cell => {
             cell.border = DATA_BORDER;
             cell.alignment = { vertical: 'middle', wrapText: true };
@@ -418,50 +449,104 @@ function addDataRows(sheet, rows) {
                 cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF7ED' } };
             });
         }
+        // Validation highlights
+        if (meta) {
+            // Tax ID (column 3) สีแดงถ้าไม่ครบ 13 หลัก
+            if (meta.taxIdInvalid) {
+                const cell = row.getCell(3);
+                cell.fill = RED_FILL;
+                cell.font = { ...cell.font, ...RED_FONT_EXTRA };
+            }
+            // วันที่ (column 5) สีแดงถ้าปีผิดปกติ
+            if (meta.dateSuspicious) {
+                const cell = row.getCell(5);
+                cell.fill = RED_FILL;
+                cell.font = { ...cell.font, ...RED_FONT_EXTRA };
+            }
+        }
     });
 }
 
-async function buildExcelWorkbook(records, companiesMap) {
+async function buildExcelWorkbook(records, companiesMap, options = {}) {
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'DocSort Pro OCR';
     workbook.created = new Date();
 
-    const vatRows = [];     // มีภาษีมูลค่าเพิ่ม
-    const nonVatRows = [];  // ไม่มีภาษีมูลค่าเพิ่ม
+    // 0) เรียงลำดับตามไฟล์ใน folder ต้นทาง (ถ้ามี)
+    let sortedRecords = records;
+    if (options.folderFileOrder && options.folderFileOrder.length > 0) {
+        const orderMap = new Map();
+        options.folderFileOrder.forEach((name, idx) => orderMap.set(name, idx));
+        sortedRecords = [...records].sort((a, b) => {
+            const ia = orderMap.has(a.file_name) ? orderMap.get(a.file_name) : 99999;
+            const ib = orderMap.has(b.file_name) ? orderMap.get(b.file_name) : 99999;
+            if (ia !== ib) return ia - ib;
+            // same file → sort by line_number (1, 2)
+            return (a.line_number || 1) - (b.line_number || 1);
+        });
+    }
+
+    const vatRows = [];      // มีภาษีมูลค่าเพิ่ม
+    const nonVatRows = [];   // ไม่มีภาษีมูลค่าเพิ่ม
+    const vatMeta = [];      // validation metadata per row
+    const nonVatMeta = [];   // validation metadata per row
     let vatSeq = 0;
     let nonVatSeq = 0;
 
-    for (const rec of records) {
+    for (const rec of sortedRecords) {
         const parsed = parseFileNamePattern(rec.file_name);
         const branch = getBranchCode(rec.seller_branch, rec.seller_name);
 
         // Classify: has VAT or not
+        // ถ้ามี line_description (จาก Company Profile) ให้ไปชีต VAT เสมอ (ทั้ง 2 บรรทัด)
         const vatAmount = parseFloat(rec.vat) || 0;
-        const hasVat = vatAmount > 0;
+        const isCustomsProfile = !!rec.line_description;
+        const hasVat = vatAmount > 0 || isCustomsProfile;
 
         // Extract BL reference from filename (e.g., BL-262289251)
         const blReference = extractBLReference(rec.file_name);
 
-        // Check amount mismatch — เก็บเป็น log (ไม่ใส่ในหมายเหตุ เพราะช่องนี้ไว้ให้ผู้ใช้กรอกเอง)
-        const remark = '';
+        // หมายเหตุ — ไม่แสดง line_description ของ Company Profile (ภาษีมูลค่าเพิ่ม/อากรขาเข้า)
+        const remark = isCustomsProfile ? '' : (rec.line_description || '');
 
         // Account codes → multi-row if multiple
-        const acctCodes = parsed.accountCodes.length > 0 ? parsed.accountCodes : [{ code: '', amount: '' }];
+        // กรอง code ที่ขึ้นต้นด้วย BL หรือ EXC ออก (เป็น reference ไม่ใช่โค้ดบัญชี)
+        const filteredAcctCodes = parsed.accountCodes.filter(ac =>
+            ac.code && !/^(BL|EXC)/i.test(ac.code)
+        );
+        const acctCodes = filteredAcctCodes.length > 0 ? filteredAcctCodes : [{ code: '', amount: '' }];
         const payCodes = parsed.paymentCodes.length > 0 ? parsed.paymentCodes : [{ code: '', amount: '' }];
 
         // Payment codes as string (for single cell)
         const payCodeStr = payCodes.map(p => p.code).filter(Boolean).join(', ');
 
-        // Target array
+        // Target array + meta
         const targetRows = hasVat ? vatRows : nonVatRows;
-        const seq = hasVat ? ++vatSeq : ++nonVatSeq;
+        const targetMeta = hasVat ? vatMeta : nonVatMeta;
+
+        // Multi-line (Company Profile): บรรทัดที่ 2+ ใช้ลำดับเดียวกับบรรทัดแรก
+        const lineNum = rec.line_number || 1;
+        const isContinuationLine = isCustomsProfile && lineNum > 1;
+        let seq;
+        if (isContinuationLine && hasVat) {
+            seq = vatSeq; // ใช้ลำดับเดิม (ไม่ increment)
+        } else if (isContinuationLine && !hasVat) {
+            seq = nonVatSeq;
+        } else {
+            seq = hasVat ? ++vatSeq : ++nonVatSeq;
+        }
+
+        // กรมศุลกากร: ใส่ชื่อแทน tax ID (ไม่มีเลข 13 หลัก)
+        const displayTaxId = isCustomsProfile
+            ? (rec.seller_name || 'กรมศุลกากร')
+            : (rec.seller_tax_id || '');
 
         if (acctCodes.length <= 1) {
-            // Single row
+            // Single row (or continuation line from profile)
             targetRows.push([
-                seq,                                   // ลำดับ
+                seq,                                    // ลำดับ (เลขเดียวกันทั้ง 2 บรรทัด)
                 rec.seller_name || '',                  // ชื่อบริษัท
-                rec.seller_tax_id || '',                // เลขผู้เสียภาษี
+                displayTaxId,                           // เลขผู้เสียภาษี
                 branch,                                 // สาขา
                 rec.document_date || '',                // วันที่
                 '',                                     // วันครบกำหนด
@@ -472,11 +557,15 @@ async function buildExcelWorkbook(records, companiesMap) {
                 rec.vat || '',                          // ยอด VAT
                 rec.total || '',                        // ยอดหลัง VAT
                 payCodeStr,                             // โค้ดชำระ
-                blReference,                            // อ้างอิง (BL reference จากชื่อไฟล์)
+                blReference,                            // อ้างอิง
                 remark,                                 // หมายเหตุ
-                parsed.originalName || rec.file_name || '', // ชื่อไฟล์ใหม่ (ชื่อเดิม)
-                rec.file_name || '',                    // ชื่อไฟล์เก่า (ชื่อเต็ม)
+                parsed.originalName || rec.file_name || '',
+                rec.file_name || '',
             ]);
+            targetMeta.push({
+                taxIdInvalid: isTaxIdInvalid(rec.seller_tax_id, isCustomsProfile),
+                dateSuspicious: isDateSuspicious(rec.document_date),
+            });
         } else {
             // Multiple account codes → multiple rows, same sequence number
             acctCodes.forEach((ac, i) => {
@@ -499,6 +588,10 @@ async function buildExcelWorkbook(records, companiesMap) {
                     i === 0 ? (parsed.originalName || rec.file_name || '') : '', // ชื่อไฟล์ใหม่ (ชื่อเดิม)
                     i === 0 ? (rec.file_name || '') : '',  // ชื่อไฟล์เก่า (ชื่อเต็ม)
                 ]);
+                targetMeta.push({
+                    taxIdInvalid: i === 0 ? isTaxIdInvalid(rec.seller_tax_id, isCustomsProfile) : false,
+                    dateSuspicious: i === 0 ? isDateSuspicious(rec.document_date) : false,
+                });
             });
         }
     }
@@ -510,7 +603,7 @@ async function buildExcelWorkbook(records, companiesMap) {
         width: [6, 30, 18, 14, 12, 14, 18, 16, 10, 14, 14, 16, 16, 12, 20, 35, 35][i] || 14
     }));
     styleHeaderRow(ws1);
-    addDataRows(ws1, vatRows);
+    addDataRows(ws1, vatRows, vatMeta);
 
     // ── Sheet 2: ไม่มีภาษีมูลค่าเพิ่ม ──
     const ws2 = workbook.addWorksheet('ไม่มีภาษีมูลค่าเพิ่ม');
@@ -519,7 +612,7 @@ async function buildExcelWorkbook(records, companiesMap) {
         width: [6, 30, 18, 14, 12, 14, 18, 16, 10, 14, 14, 16, 16, 12, 20, 35, 35][i] || 14
     }));
     styleHeaderRow(ws2);
-    addDataRows(ws2, nonVatRows);
+    addDataRows(ws2, nonVatRows, nonVatMeta);
 
     // ── Sheet 3: ที่อยู่แต่ละบริษัท ──
     const ws3 = workbook.addWorksheet('ที่อยู่แต่ละบริษัท');

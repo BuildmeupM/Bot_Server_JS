@@ -40,9 +40,52 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
         addLog(job.id, "info", `📋 พบผู้ใช้ในระบบ ${userNames.length} คน: ${userNames.join(", ")}`);
 
         const requiredUser = "Kanokwan somsri";
-        const found = userNames.some(
+        let found = userNames.some(
           name => name.toLowerCase() === requiredUser.toLowerCase()
         );
+
+        // ถ้าไม่พบในหน้าแรก → เปลี่ยนจำนวนแสดงเป็น 100 แล้วตรวจสอบใหม่
+        if (!found) {
+          addLog(job.id, "warn", `⚠️ ไม่พบ ${requiredUser} ในรายการ ${userNames.length} คนแรก — กำลังเปลี่ยนจำนวนแสดงเป็น 100...`);
+
+          try {
+            // เลื่อนลงไปด้านล่างเพื่อหา Dropdown เลือกจำนวนแสดง
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await page.waitForTimeout(1000);
+
+            // คลิก Dropdown ที่แสดงจำนวน (multiselect ที่มีค่า 10, 20, 50, 100)
+            const pageSizeDropdown = page.locator('#inputDropdown .multiselect').first();
+            await pageSizeDropdown.waitFor({ state: 'visible', timeout: 5000 });
+            await pageSizeDropdown.click();
+            await page.waitForTimeout(500);
+
+            // เลือก 100
+            const option100 = pageSizeDropdown.locator('.multiselect__element .multiselect__option').filter({ hasText: '100' }).first();
+            await option100.waitFor({ state: 'visible', timeout: 3000 });
+            await option100.click();
+            addLog(job.id, "info", "📊 เปลี่ยนจำนวนแสดงเป็น 100 สำเร็จ — รอตารางโหลดใหม่...");
+
+            await page.waitForTimeout(3000); // รอตารางโหลดใหม่
+
+            // เลื่อนกลับขึ้นด้านบนเพื่ออ่านตาราง
+            await page.evaluate(() => window.scrollTo(0, 0));
+            await page.waitForTimeout(500);
+
+            // อ่านชื่อผู้ใช้ใหม่อีกครั้ง
+            const userNamesRetry = await page.evaluate(() => {
+              const cells = document.querySelectorAll("#customTable .TabelBody table tr td p.crop");
+              return Array.from(cells).map(el => el.textContent.trim());
+            });
+
+            addLog(job.id, "info", `📋 (ครั้งที่ 2) พบผู้ใช้ในระบบ ${userNamesRetry.length} คน: ${userNamesRetry.join(", ")}`);
+
+            found = userNamesRetry.some(
+              name => name.toLowerCase() === requiredUser.toLowerCase()
+            );
+          } catch (paginationErr) {
+            addLog(job.id, "warn", `⚠️ ไม่สามารถเปลี่ยนจำนวนแสดงได้: ${paginationErr.message}`);
+          }
+        }
 
         if (found) {
           addLog(job.id, "success", `✅ พบ ${requiredUser} เป็นผู้ดูแลระบบ — ผ่านการตรวจสอบ`);
@@ -111,6 +154,8 @@ async function executeJobFlow(job, page, context, pool, peakCode, addLog) {
 
         addLog(job.id, "info", `▶️ เลขที่เอกสาร: ${primaryTx["เลขที่เอกสาร"]}`);
         addLog(job.id, "info", `▶️ ผู้ขาย: ${rawVendorName} | เลขภาษี: ${taxId}`);
+        const _oldFileKey = Object.keys(primaryTx).find(k => k.replace(/[\n\r\s]/g, '').includes('ชื่อไฟล์เก่า'));
+        if (_oldFileKey && primaryTx[_oldFileKey]) addLog(job.id, "info", `📄 ต้นฉบับ: ${String(primaryTx[_oldFileKey]).trim()}`);
         addLog(job.id, "info", `=========================================\n`);
         
         // ทุกรอบ(รวมรอบแรกด้วยถ้าพึ่งเปิดใหม่) เช็คสถานะ Page ให้ชัวร์ว่ายังไม่ตาย

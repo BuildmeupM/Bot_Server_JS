@@ -12,6 +12,7 @@ const path = require('path');
 const { preprocessImage, getFileType } = require('./preprocess');
 const { postProcessOcrData } = require('./postprocess');
 const { applyCompanyRules } = require('./company-rules');
+const { detectProfile, getAllCustomFields } = require('./company-profiles');
 const { getPool } = require('../../mysql');
 
 // ─── Auto-save company data from OCR results ───
@@ -87,10 +88,11 @@ async function saveOcrHistory(data) {
         const pool = getPool();
         const buildInfo = extractBuildInfo(data.filePath);
 
-        // ตรวจสอบว่ามี record เดิมของ file_name นี้หรือไม่
+        // ตรวจสอบว่ามี record เดิมของ file_name + line_number นี้หรือไม่
+        const lineNum = data.lineNumber || 1;
         const [existing] = await pool.execute(
-            `SELECT id FROM ocr_history WHERE file_name = ? LIMIT 1`,
-            [data.fileName]
+            `SELECT id FROM ocr_history WHERE file_name = ? AND COALESCE(line_number, 1) = ? LIMIT 1`,
+            [data.fileName, lineNum]
         );
 
         if (existing.length > 0) {
@@ -101,7 +103,7 @@ async function saveOcrHistory(data) {
                     seller_name = ?, seller_tax_id = ?, seller_branch = ?, seller_address = ?, buyer_name = ?, buyer_tax_id = ?, buyer_address = ?,
                     subtotal = ?, vat = ?, total = ?, processing_time_ms = ?,
                     ocr_by = ?, batch_job_id = ?, status = ?,
-                    build_code = ?, build_name = ?, updated_at = CURRENT_TIMESTAMP
+                    build_code = ?, build_name = ?, line_description = ?, updated_at = CURRENT_TIMESTAMP
                  WHERE id = ?`,
                 [
                     data.filePath || null,
@@ -124,6 +126,7 @@ async function saveOcrHistory(data) {
                     data.status || 'done',
                     buildInfo.code,
                     buildInfo.name,
+                    data.lineDescription || null,
                     existing[0].id
                 ]
             );
@@ -134,8 +137,9 @@ async function saveOcrHistory(data) {
                 `INSERT INTO ocr_history 
                  (file_name, file_path, document_type, document_number, document_date,
                   seller_name, seller_tax_id, seller_branch, seller_address, buyer_name, buyer_tax_id, buyer_address,
-                  subtotal, vat, total, processing_time_ms, ocr_by, batch_job_id, status, build_code, build_name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                  subtotal, vat, total, processing_time_ms, ocr_by, batch_job_id, status, build_code, build_name,
+                  line_number, line_description)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 [
                     data.fileName || null,
                     data.filePath || null,
@@ -157,7 +161,9 @@ async function saveOcrHistory(data) {
                     data.batchJobId || null,
                     data.status || 'done',
                     buildInfo.code,
-                    buildInfo.name
+                    buildInfo.name,
+                    data.lineNumber || 1,
+                    data.lineDescription || null
                 ]
             );
         }
@@ -351,7 +357,10 @@ async function processWorker(job, workerIndex, apiUrl) {
                         contentType: mimeType
                     });
                     form.append('model', 'aksonocr-1.0');
-                    form.append('customFields', JSON.stringify(FINANCIAL_DOCUMENT_FIELDS));
+                    // รวม custom fields จาก company profiles
+                    const profileCustomFields = getAllCustomFields();
+                    const allOcrFields = [...FINANCIAL_DOCUMENT_FIELDS, ...profileCustomFields];
+                    form.append('customFields', JSON.stringify(allOcrFields));
 
                     ocrResponse = await axios.post(apiUrl, form, {
                         headers: {
@@ -404,48 +413,87 @@ async function processWorker(job, workerIndex, apiUrl) {
             }
 
             const processedData = postProcessOcrData(rawFields);
-            const { data: finalData, ruleApplied } = applyCompanyRules(processedData);
+            const { data: ruledData, ruleApplied } = applyCompanyRules(processedData);
 
+            // 5.5 Company Profile Detection (รองรับ multi-line)
+            const matchedProfile = detectProfile(ruledData, rawFields);
+            let finalResults = [ruledData];
+            let profileApplied = null;
+
+            if (matchedProfile && typeof matchedProfile.transform === 'function') {
+                console.log(`  🏛️ Worker ${worker.workerId}: พบ Company Profile: ${matchedProfile.name}`);
+                try {
+                    const transformed = matchedProfile.transform(ruledData, rawFields);
+                    if (Array.isArray(transformed) && transformed.length > 0) {
+                        finalResults = transformed;
+                        console.log(`  📋 Profile แปลงเป็น ${transformed.length} บรรทัด`);
+                    } else if (transformed && typeof transformed === 'object') {
+                        finalResults = [transformed];
+                    }
+                    profileApplied = {
+                        name: matchedProfile.name,
+                        description: matchedProfile.description,
+                        linesProduced: finalResults.length
+                    };
+                } catch (profileErr) {
+                    console.error(`  ❌ Profile error (${matchedProfile.name}):`, profileErr.message);
+                }
+            }
+
+            const primaryData = finalResults[0];
             const fileTimeMs = Date.now() - fileStartTime;
 
+            // Push 1 result per file → หน้าเว็บแสดงเป็น 1 รายการ (พร้อม subLines สำหรับแสดง 2 บรรทัดภายใน)
             worker.results.push({
                 file: fileName,
                 filePath,
                 status: 'done',
                 timeMs: fileTimeMs,
-                data: finalData,
+                data: primaryData,
                 ruleApplied: ruleApplied || null,
-                warnings: finalData.warnings || []
+                profileApplied: profileApplied || null,
+                subLines: finalResults.length > 1 ? finalResults.map(l => ({
+                    lineDescription: l.lineDescription || null,
+                    documentNumber: l.documentNumber || null,
+                    subtotal: l.subtotal || null,
+                    vat: l.vat || null,
+                    total: l.total || null,
+                })) : undefined,
+                warnings: primaryData.warnings || []
             });
 
             // Auto-save company data to master DB
-            await autoSaveCompanies(finalData);
+            await autoSaveCompanies(primaryData);
 
-            // Save OCR history (ป้องกันอ่านซ้ำ)
-            await saveOcrHistory({
-                fileName,
-                filePath,
-                documentType: finalData.documentType,
-                documentNumber: finalData.documentNumber,
-                documentDate: finalData.documentDate,
-                sellerName: finalData.sellerName,
-                sellerTaxId: finalData.sellerTaxId,
-                sellerBranch: finalData.sellerBranch,
-                sellerAddress: finalData.sellerAddress,
-                buyerName: finalData.buyerName,
-                buyerTaxId: finalData.buyerTaxId,
-                buyerAddress: finalData.buyerAddress,
-                subtotal: finalData.subtotal,
-                vat: finalData.vat,
-                total: finalData.total,
-                processingTimeMs: fileTimeMs,
-                ocrBy: job.createdBy ? job.createdBy.username : null,
-                batchJobId: job.jobId,
-                status: 'done'
-            });
+            // Save OCR history — ทุก line (2 records ใน DB สำหรับ Excel export)
+            for (const lineData of finalResults) {
+                await saveOcrHistory({
+                    fileName,
+                    filePath,
+                    documentType: lineData.documentType,
+                    documentNumber: lineData.documentNumber,
+                    documentDate: lineData.documentDate,
+                    sellerName: lineData.sellerName,
+                    sellerTaxId: lineData.sellerTaxId,
+                    sellerBranch: lineData.sellerBranch,
+                    sellerAddress: lineData.sellerAddress,
+                    buyerName: lineData.buyerName,
+                    buyerTaxId: lineData.buyerTaxId,
+                    buyerAddress: lineData.buyerAddress,
+                    subtotal: lineData.subtotal,
+                    vat: lineData.vat,
+                    total: lineData.total,
+                    processingTimeMs: fileTimeMs,
+                    ocrBy: job.createdBy ? job.createdBy.username : null,
+                    batchJobId: job.jobId,
+                    status: 'done',
+                    lineNumber: lineData.lineNumber || 1,
+                    lineDescription: lineData.lineDescription || null
+                });
+            }
 
             worker.completed++;
-            console.log(`  ✅ Worker ${worker.workerId}: ${fileName} — สำเร็จ (${fileTimeMs}ms)`);
+            console.log(`  ✅ Worker ${worker.workerId}: ${fileName} — สำเร็จ (${fileTimeMs}ms${finalResults.length > 1 ? `, ${finalResults.length} รายการ` : ''})`);
 
         } catch (err) {
             const fileTimeMs = Date.now() - fileStartTime;

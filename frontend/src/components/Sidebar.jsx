@@ -5,7 +5,7 @@ export default function Sidebar({ active }) {
     const location = useLocation()
     const user = JSON.parse(localStorage.getItem('user') || '{"display_name": "Admin", "role": "admin"}')
     const isDocSort = ['/manage', '/tools', '/companies', '/dashboard', '/manual'].includes(location.pathname)
-    const isBotPage = ['/bot-automation', '/ocr-dashboard', '/bot-database'].includes(location.pathname)
+    const isBotPage = ['/bot-automation', '/ocr-dashboard', '/bot-database', '/bot-dashboard'].includes(location.pathname)
     const isAkmPage = ['/akm-reader'].includes(location.pathname)
     const isTaxPage = ['/tax-certificate'].includes(location.pathname)
 
@@ -40,6 +40,10 @@ export default function Sidebar({ active }) {
                             <button className={`nav-item ${location.pathname === '/ocr-dashboard' ? 'active' : ''}`}
                                 onClick={() => navigate('/ocr-dashboard')}>
                                 <span className="icon">📊</span> OCR Dashboard
+                            </button>
+                            <button className={`nav-item ${location.pathname === '/bot-dashboard' ? 'active' : ''}`}
+                                onClick={() => navigate('/bot-dashboard')}>
+                                <span className="icon">📡</span> Bot Dashboard
                             </button>
                             <button className={`nav-item ${location.pathname === '/bot-database' ? 'active' : ''}`}
                                 onClick={() => navigate('/bot-database')}>

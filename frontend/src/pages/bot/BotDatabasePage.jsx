@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import Sidebar from '../../components/Sidebar';
-import { getBotProfiles, createBotProfile, deleteBotProfile, getBotCredentials, createBotCredential, deleteBotCredential } from '../../services/api';
+import { getBotProfiles, createBotProfile, updateBotProfile, deleteBotProfile, getBotCredentials, createBotCredential, deleteBotCredential } from '../../services/api';
 import './BotDatabasePage.css';
 
 const IconWrapper = ({ emoji, className = '' }) => <span className={`inline-flex items-center justify-center w-[1em] h-[1em] ${className}`}>{emoji}</span>;
@@ -14,6 +14,7 @@ const Key = (p) => <IconWrapper emoji="🔑" {...p} />;
 const Copy = (p) => <IconWrapper emoji="📋" {...p} />;
 const Check = (p) => <IconWrapper emoji="✅" {...p} />;
 const Trash2 = (p) => <IconWrapper emoji="🗑️" {...p} />;
+const Edit = (p) => <IconWrapper emoji="✏️" {...p} />;
 
 export default function BotDatabasePage() {
     // === State Management ===
@@ -26,7 +27,8 @@ export default function BotDatabasePage() {
     const [loading, setLoading] = useState(true);
 
     const [activeTab, setActiveTab] = useState('database');
-    const [expandedPdfConfigs, setExpandedPdfConfigs] = useState({}); // track expanded state by profile id
+    const [expandedPdfConfigs, setExpandedPdfConfigs] = useState({});
+    const [editingProfile, setEditingProfile] = useState(null); // profile id being edited
 
     // Fetch Initial Data
     useEffect(() => {
@@ -40,7 +42,19 @@ export default function BotDatabasePage() {
                 getBotProfiles(),
                 getBotCredentials()
             ]);
-            setProfiles(profilesRes.data || []);
+            const rawProfiles = profilesRes.data || [];
+            setProfiles(rawProfiles.map(p => ({
+                ...p,
+                peakCode: p.peakCode || p.peak_code || '',
+                vatStatus: p.vatStatus || p.vat_status || 'registered',
+                lastSync: p.lastSync || p.last_sync || '',
+                pdfConfigs: (p.pdfConfigs || []).map(c => ({
+                    companyName: c.companyName || c.company_name || '',
+                    customerCode: c.customerCode || c.customer_code || '',
+                    accountCode: c.accountCode || c.account_code || '',
+                    paymentCode: c.paymentCode || c.payment_code || ''
+                }))
+            })));
             setCredentials(credsRes.data || []);
         } catch (error) {
             console.error("Error fetching data:", error);
@@ -105,17 +119,23 @@ export default function BotDatabasePage() {
     const handleSubmit = async (e) => {
         e.preventDefault();
         try {
-            const res = await createBotProfile(formData);
-            setProfiles([res.data, ...profiles]);
+            if (editingProfile) {
+                await updateBotProfile(editingProfile, formData);
+                toast.success("อัปเดตข้อมูลบอทสำเร็จ");
+                setEditingProfile(null);
+            } else {
+                await createBotProfile(formData);
+                toast.success("บันทึกข้อมูลบอทสำเร็จ");
+            }
             setFormData({ 
                 platform: '', username: '', password: '', 
                 software: '', peakCode: '', 
                 vatStatus: 'registered',
                 pdfConfigs: [{ companyName: '', customerCode: '', accountCode: '', paymentCode: '' }] 
             });
-            toast.success("บันทึกข้อมูลบอทสำเร็จ");
+            fetchData();
         } catch (error) {
-            console.error("Error creating profile:", error);
+            console.error("Error saving profile:", error);
             toast.error("เกิดข้อผิดพลาดในการบันทึกข้อมูล");
         }
     };
@@ -163,9 +183,9 @@ export default function BotDatabasePage() {
     };
 
     const filteredProfiles = profiles.filter(p => 
-        p.platform.toLowerCase().includes(searchTerm.toLowerCase()) || 
-        p.peakCode.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.software.toLowerCase().includes(searchTerm.toLowerCase())
+        (p.platform || '').toLowerCase().includes(searchTerm.toLowerCase()) || 
+        (p.peakCode || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (p.software || '').toLowerCase().includes(searchTerm.toLowerCase())
     );
 
     const filteredCredentials = credentials.filter(c => 
@@ -337,9 +357,25 @@ export default function BotDatabasePage() {
 
                                             <div className="bot-card-footer">
                                                 <span className="sync-time">อัปเดตล่าสุด: {profile.lastSync}</span>
-                                                <button className="btn-delete" title="ลบข้อมูล" onClick={() => handleDeleteProfile(profile.id)}>
-                                                    <Trash2 />
-                                                </button>
+                                                <div style={{ display: 'flex', gap: 6 }}>
+                                                    <button className="btn-delete" title="แก้ไข" style={{ color: '#f97316', background: '#fff7ed', border: '1px solid #fed7aa' }} onClick={() => {
+                                                        setEditingProfile(profile.id);
+                                                        setFormData({
+                                                            platform: profile.platform || '',
+                                                            username: profile.username || '',
+                                                            password: profile.password || '',
+                                                            software: profile.software || '',
+                                                            peakCode: profile.peakCode || '',
+                                                            vatStatus: profile.vatStatus || 'registered',
+                                                            pdfConfigs: profile.pdfConfigs?.length ? profile.pdfConfigs : [{ companyName: '', customerCode: '', accountCode: '', paymentCode: '' }]
+                                                        });
+                                                    }}>
+                                                        <Edit />
+                                                    </button>
+                                                    <button className="btn-delete" title="ลบข้อมูล" onClick={() => handleDeleteProfile(profile.id)}>
+                                                        <Trash2 />
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
                                     ))}
@@ -351,10 +387,10 @@ export default function BotDatabasePage() {
                         <div className="bot-db-form-col">
                             <div className="form-header">
                                 <h2 className="form-title">
-                                    <span className="hash-mark">+</span>
-                                    เพิ่มข้อมูลบอทใหม่
+                                    <span className="hash-mark">{editingProfile ? '✏️' : '+'}</span>
+                                    {editingProfile ? 'แก้ไขข้อมูลบอท' : 'เพิ่มข้อมูลบอทใหม่'}
                                 </h2>
-                                <p className="form-desc">บันทึกรหัสผ่านใหม่ลงฐานข้อมูล ข้อมูลจะถูกเข้ารหัสระดับสูง</p>
+                                <p className="form-desc">{editingProfile ? `กำลังแก้ไข ${editingProfile}` : 'บันทึกรหัสผ่านใหม่ลงฐานข้อมูล ข้อมูลจะถูกเข้ารหัสระดับสูง'}</p>
                             </div>
 
                             <form onSubmit={handleSubmit}>
@@ -368,15 +404,15 @@ export default function BotDatabasePage() {
                                         <label className="brutal-label"><Key className="icon" style={{color: '#f97316'}} /> เลือกชุดรหัสผ่าน (ถ้ามี)</label>
                                         <select 
                                             className="brutal-input peak-input"
+                                            value={credentials.find(c => c.username === formData.username)?.id || ''}
                                             onChange={(e) => {
                                                 const cred = credentials.find(c => c.id === e.target.value);
                                                 if(cred) {
                                                     setFormData(prev => ({...prev, username: cred.username, password: cred.password}));
                                                 }
                                             }}
-                                            defaultValue=""
                                         >
-                                            <option value="" disabled>-- เลือกชุดรหัสผ่านจากที่ตั้งค่าไว้ --</option>
+                                            <option value="">-- เลือกชุดรหัสผ่านจากที่ตั้งค่าไว้ --</option>
                                             {credentials.map(cred => (
                                                 <option key={cred.id} value={cred.id}>{cred.name}</option>
                                             ))}
@@ -500,8 +536,16 @@ export default function BotDatabasePage() {
 
                                 <div className="form-actions">
                                     <button type="submit" className="bot-btn-primary btn-submit">
-                                        <Plus /> บันทึกข้อมูลบอท
+                                        <Plus /> {editingProfile ? 'อัปเดตข้อมูล' : 'บันทึกข้อมูลบอท'}
                                     </button>
+                                    {editingProfile && (
+                                        <button type="button" onClick={() => {
+                                            setEditingProfile(null);
+                                            setFormData({ platform: '', username: '', password: '', software: '', peakCode: '', vatStatus: 'registered', pdfConfigs: [{ companyName: '', customerCode: '', accountCode: '', paymentCode: '' }] });
+                                        }} style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', color: '#64748b', fontSize: 13, fontWeight: 600, cursor: 'pointer', marginTop: 8 }}>
+                                            ยกเลิกการแก้ไข
+                                        </button>
+                                    )}
                                 </div>
                             </form>
                         </div>

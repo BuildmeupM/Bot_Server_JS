@@ -12,6 +12,7 @@ import OcrDashboardPage from './pages/bot/OcrDashboardPage'
 import OcrBuildReportPage from './pages/bot/OcrBuildReportPage'
 import AkmReaderPage from './pages/akm-reader/AkmReaderPage'
 import BotDatabasePage from './pages/bot/BotDatabasePage'
+import BotDashboardPage from './pages/bot/BotDashboardPage'
 import WithholdingTaxPage from './pages/tax/WithholdingTaxPage'
 
 function ProtectedRoute({ children }) {
@@ -39,6 +40,7 @@ export default function App() {
                 <Route path="/manual" element={<ProtectedRoute><ManualPage /></ProtectedRoute>} />
                 <Route path="/bot-automation" element={<ProtectedRoute><BotAutomationPage /></ProtectedRoute>} />
                 <Route path="/bot-database" element={<ProtectedRoute><BotDatabasePage /></ProtectedRoute>} />
+                <Route path="/bot-dashboard" element={<ProtectedRoute><BotDashboardPage /></ProtectedRoute>} />
                 <Route path="/ocr-dashboard" element={<ProtectedRoute><OcrDashboardPage /></ProtectedRoute>} />
                 <Route path="/ocr-report/:code" element={<ProtectedRoute><OcrBuildReportPage /></ProtectedRoute>} />
                 <Route path="/akm-reader" element={<ProtectedRoute><AkmReaderPage /></ProtectedRoute>} />

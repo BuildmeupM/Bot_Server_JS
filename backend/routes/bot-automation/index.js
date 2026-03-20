@@ -248,6 +248,17 @@ router.post('/start', async (req, res) => {
 router.get('/jobs', (req, res) => {
     const jobList = [];
     for (const [id, job] of jobs) {
+        // Parse progress from logs — pattern: 📦 [บิลที่ X/Y]
+        let progressCurrent = 0, progressTotal = 0;
+        for (let i = job.logs.length - 1; i >= 0; i--) {
+            const m = job.logs[i].message?.match(/บิลที่\s*(\d+)\s*\/\s*(\d+)/);
+            if (m) {
+                progressCurrent = parseInt(m[1], 10);
+                progressTotal = parseInt(m[2], 10);
+                break;
+            }
+        }
+
         jobList.push({
             id: job.id,
             profileId: job.profileId,
@@ -259,9 +270,11 @@ router.get('/jobs', (req, res) => {
             createdAt: job.createdAt,
             startedAt: job.startedAt,
             finishedAt: job.finishedAt,
+            progressCurrent,
+            progressTotal,
         });
     }
-    const order = { running: 0, logged_in: 0, working: 0, queued: 1, done: 2, error: 3, stopped: 4 };
+    const order = { running: 0, logged_in: 0, working: 0, queued: 1, finished: 2, done: 2, error: 3, stopped: 4 };
     jobList.sort((a, b) => (order[a.status] ?? 5) - (order[b.status] ?? 5));
 
     res.json({

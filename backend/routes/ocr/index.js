@@ -10,6 +10,7 @@ const multer = require('multer');
 const { preprocessImage, getFileType } = require('./preprocess');
 const { postProcessOcrData } = require('./postprocess');
 const { applyCompanyRules, listCompanyRules } = require('./company-rules');
+const { detectProfile, getAllCustomFields, listProfiles } = require('./company-profiles');
 const authMiddleware = require('../../middleware/auth');
 const { getPool } = require('../../mysql');
 const { buildExcelWorkbook } = require('./excel-export');
@@ -81,7 +82,7 @@ function extractBuildInfo(filePath) {
     return { code: codeOnly ? codeOnly[0] : null, name: null };
 }
 
-// ─── Save OCR result to history ───
+// ─── Save OCR result to history (รองรับ line_number / line_description) ───
 async function saveOcrHistory(data) {
     try {
         const pool = getPool();
@@ -90,8 +91,9 @@ async function saveOcrHistory(data) {
             `INSERT INTO ocr_history 
              (file_name, file_path, document_type, document_number, document_date,
               seller_name, seller_tax_id, seller_branch, buyer_name, buyer_tax_id,
-              subtotal, vat, total, processing_time_ms, ocr_by, batch_job_id, status, build_code, build_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              subtotal, vat, total, processing_time_ms, ocr_by, batch_job_id, status, build_code, build_name,
+              line_number, line_description)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 file_path = VALUES(file_path), document_type = VALUES(document_type),
                 document_number = VALUES(document_number), document_date = VALUES(document_date),
@@ -100,6 +102,7 @@ async function saveOcrHistory(data) {
                 buyer_name = VALUES(buyer_name), buyer_tax_id = VALUES(buyer_tax_id),
                 subtotal = VALUES(subtotal), vat = VALUES(vat), total = VALUES(total),
                 processing_time_ms = VALUES(processing_time_ms), status = VALUES(status),
+                line_description = VALUES(line_description),
                 updated_at = CURRENT_TIMESTAMP`,
             [
                 data.fileName || null,
@@ -120,7 +123,9 @@ async function saveOcrHistory(data) {
                 data.batchJobId || null,
                 data.status || 'done',
                 buildInfo.code,
-                buildInfo.name
+                buildInfo.name,
+                data.lineNumber || 1,
+                data.lineDescription || null
             ]
         );
     } catch (err) {
@@ -412,7 +417,7 @@ router.get('/dashboard-stats', async (req, res) => {
                    COALESCE(h.updated_at, h.created_at) as created_at
             FROM ocr_history h
             INNER JOIN (
-                SELECT MAX(id) as max_id FROM ocr_history GROUP BY file_name
+                SELECT MAX(id) as max_id FROM ocr_history GROUP BY file_name, COALESCE(line_number, 1)
             ) latest ON h.id = latest.max_id
             ORDER BY COALESCE(h.updated_at, h.created_at) DESC LIMIT 20
         `);
@@ -548,7 +553,7 @@ router.get('/build-report/:code', async (req, res) => {
             INNER JOIN (
                 SELECT MAX(id) as max_id FROM ocr_history 
                 WHERE build_code = ?
-                GROUP BY file_name
+                GROUP BY file_name, COALESCE(line_number, 1)
             ) latest ON h.id = latest.max_id
             ORDER BY COALESCE(h.updated_at, h.created_at) DESC
         `, [buildCode]);
@@ -631,9 +636,9 @@ router.get('/export-excel/:buildCode', async (req, res) => {
                 }
             }
         }
-        // folderPath — อ่านชื่อไฟล์ PDF จาก folder แล้วเทียบ
+        // folderPath — อ่านชื่อไฟล์ PDF จาก folder แล้วเทียบ (เก็บลำดับไว้สำหรับ sorting)
+        const folderFiles = [];
         if (folderPath && fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory()) {
-            const folderFiles = [];
             const entries = fs.readdirSync(folderPath, { withFileTypes: true });
             for (const entry of entries) {
                 if (entry.isFile() && /\.pdf$/i.test(entry.name)) {
@@ -659,12 +664,13 @@ router.get('/export-excel/:buildCode', async (req, res) => {
         const [records] = await pool.query(
             `SELECT h.id, h.file_name, h.file_path, h.document_type, h.document_number, h.document_date,
                     h.seller_name, h.seller_tax_id, h.seller_branch, h.seller_address, h.buyer_name, h.buyer_tax_id, h.buyer_address,
-                    h.subtotal, h.vat, h.total, h.status, h.created_at
+                    h.subtotal, h.vat, h.total, h.status, h.created_at,
+                    h.line_number, h.line_description
              FROM ocr_history h
              INNER JOIN (
                  SELECT MAX(id) as max_id FROM ocr_history 
                  WHERE ${whereClause}
-                 GROUP BY file_name
+                 GROUP BY file_name, COALESCE(line_number, 1)
              ) latest ON h.id = latest.max_id
              ORDER BY h.created_at ASC`,
             params
@@ -686,8 +692,10 @@ router.get('/export-excel/:buildCode', async (req, res) => {
             companies.forEach(c => { companiesMap[c.tax_id] = c; });
         }
 
-        // Build Excel workbook
-        const workbook = await buildExcelWorkbook(records, companiesMap);
+        // Build Excel workbook (pass folder file order for sorting)
+        const workbook = await buildExcelWorkbook(records, companiesMap, {
+            folderFileOrder: folderFiles || []
+        });
 
         // Stream as download
         const dateSuffix = dateFrom && dateTo ? `_${dateFrom}_to_${dateTo}` : '';
@@ -736,12 +744,13 @@ router.get('/export-excel-all', async (req, res) => {
         const [records] = await pool.query(
             `SELECT h.id, h.file_name, h.file_path, h.document_type, h.document_number, h.document_date,
                     h.seller_name, h.seller_tax_id, h.seller_branch, h.seller_address, h.buyer_name, h.buyer_tax_id, h.buyer_address,
-                    h.subtotal, h.vat, h.total, h.status, h.created_at
+                    h.subtotal, h.vat, h.total, h.status, h.created_at,
+                    h.line_number, h.line_description
              FROM ocr_history h
              INNER JOIN (
                  SELECT MAX(id) as max_id FROM ocr_history
                  WHERE ${whereClause}
-                 GROUP BY file_name
+                 GROUP BY file_name, COALESCE(line_number, 1)
              ) latest ON h.id = latest.max_id
              ORDER BY h.created_at ASC`,
             params
@@ -829,7 +838,7 @@ router.post('/list-folder-files', async (req, res) => {
         const pool = getPool();
         const placeholders = allFiles.map(() => '?').join(',');
         const [dbRows] = await pool.query(
-            `SELECT file_name FROM ocr_history WHERE file_name IN (${placeholders}) AND status = 'done' GROUP BY file_name`,
+            `SELECT file_name FROM ocr_history WHERE file_name IN (${placeholders}) AND status = 'done' GROUP BY file_name, COALESCE(line_number, 1)`,
             allFiles
         );
         const matchedSet = new Set(dbRows.map(r => r.file_name));
@@ -898,12 +907,13 @@ router.post('/export-excel-by-folder', async (req, res) => {
         const [records] = await pool.query(
             `SELECT h.id, h.file_name, h.file_path, h.document_type, h.document_number, h.document_date,
                     h.seller_name, h.seller_tax_id, h.seller_branch, h.seller_address, h.buyer_name, h.buyer_tax_id, h.buyer_address,
-                    h.subtotal, h.vat, h.total, h.status, h.created_at
+                    h.subtotal, h.vat, h.total, h.status, h.created_at,
+                    h.line_number, h.line_description
              FROM ocr_history h
              INNER JOIN (
                  SELECT MAX(id) as max_id FROM ocr_history
                  WHERE file_name IN (${placeholders}) AND status = 'done'
-                 GROUP BY file_name
+                 GROUP BY file_name, COALESCE(line_number, 1)
              ) latest ON h.id = latest.max_id
              ORDER BY h.created_at ASC`,
             allFiles
@@ -1029,7 +1039,10 @@ router.post('/process', upload.single('file'), async (req, res) => {
             contentType: mimeType
         });
         form.append('model', 'aksonocr-1.0');
-        form.append('customFields', JSON.stringify(FINANCIAL_DOCUMENT_FIELDS));
+        // รวม custom fields จาก company profiles เข้ากับ standard fields
+        const profileCustomFields = getAllCustomFields();
+        const allOcrFields = [...FINANCIAL_DOCUMENT_FIELDS, ...profileCustomFields];
+        form.append('customFields', JSON.stringify(allOcrFields));
 
         const ocrResponse = await axios.post(API_URL, form, {
             headers: {
@@ -1083,43 +1096,78 @@ router.post('/process', upload.single('file'), async (req, res) => {
         const processedData = postProcessOcrData(rawFields);
         console.log('✅ Post-Processing เสร็จสิ้น');
 
-        // 7. Company Custom Rules
-        const { data: finalData, ruleApplied } = applyCompanyRules(processedData);
+        // 7. Company Custom Rules (เดิม — ทำงานต่อเนื่อง)
+        const { data: ruledData, ruleApplied } = applyCompanyRules(processedData);
         if (ruleApplied) {
             console.log(`🏢 ใช้ Company Rule: ${ruleApplied.companyName}`);
         }
 
+        // 7.5 Company Profile Detection (ระบบใหม่ — รองรับ multi-line)
+        const matchedProfile = detectProfile(ruledData, rawFields);
+        let finalResults = [ruledData]; // default: single record
+        let profileApplied = null;
+
+        if (matchedProfile && typeof matchedProfile.transform === 'function') {
+            console.log(`🏛️ พบ Company Profile: ${matchedProfile.name}`);
+            try {
+                const transformed = matchedProfile.transform(ruledData, rawFields);
+                if (Array.isArray(transformed) && transformed.length > 0) {
+                    finalResults = transformed;
+                    console.log(`📋 Profile แปลงเป็น ${transformed.length} บรรทัด`);
+                } else if (transformed && typeof transformed === 'object') {
+                    finalResults = [transformed];
+                }
+                profileApplied = {
+                    name: matchedProfile.name,
+                    description: matchedProfile.description,
+                    linesProduced: finalResults.length
+                };
+            } catch (profileErr) {
+                console.error(`❌ Profile transform error (${matchedProfile.name}):`, profileErr.message);
+                ruledData.warnings = ruledData.warnings || [];
+                ruledData.warnings.push(`⚠️ Profile error: ${profileErr.message}`);
+            }
+        }
+
         // 8. สรุปผล + Auto-save companies
         const processingTime = Date.now() - startTime;
-        autoSaveCompanies(finalData).catch(e => console.error('⚠️ Auto-save error:', e.message));
+        const primaryData = finalResults[0];
+        autoSaveCompanies(primaryData).catch(e => console.error('⚠️ Auto-save error:', e.message));
 
-        // Save OCR history (ป้องกันอ่านซ้ำ)
-        saveOcrHistory({
-            fileName: originalName,
-            filePath: tempFilePath,
-            documentType: finalData.documentType,
-            documentNumber: finalData.documentNumber,
-            documentDate: finalData.documentDate,
-            sellerName: finalData.sellerName,
-            sellerTaxId: finalData.sellerTaxId,
-            sellerBranch: finalData.sellerBranch,
-            buyerName: finalData.buyerName,
-            buyerTaxId: finalData.buyerTaxId,
-            subtotal: finalData.subtotal,
-            vat: finalData.vat,
-            total: finalData.total,
-            processingTimeMs: processingTime,
-            ocrBy: null,
-            batchJobId: null,
-            status: 'done'
-        }).catch(e => console.error('⚠️ Save history error:', e.message));
+        // Save OCR history — บันทึกทุก line
+        for (const lineData of finalResults) {
+            saveOcrHistory({
+                fileName: originalName,
+                filePath: tempFilePath,
+                documentType: lineData.documentType,
+                documentNumber: lineData.documentNumber,
+                documentDate: lineData.documentDate,
+                sellerName: lineData.sellerName,
+                sellerTaxId: lineData.sellerTaxId,
+                sellerBranch: lineData.sellerBranch,
+                buyerName: lineData.buyerName,
+                buyerTaxId: lineData.buyerTaxId,
+                subtotal: lineData.subtotal,
+                vat: lineData.vat,
+                total: lineData.total,
+                processingTimeMs: processingTime,
+                ocrBy: null,
+                batchJobId: null,
+                status: 'done',
+                lineNumber: lineData.lineNumber || 1,
+                lineDescription: lineData.lineDescription || null
+            }).catch(e => console.error('⚠️ Save history error:', e.message));
+        }
 
         console.log(`⏱️ เวลาทั้งหมด: ${processingTime}ms`);
         console.log(`📄 ═══════════════════════════════════════════\n`);
 
+        // Response: ส่ง multiLine flag + ข้อมูลทุกบรรทัด
+        const isMultiLine = finalResults.length > 1;
         res.json({
             success: true,
-            data: finalData,
+            multiLine: isMultiLine,
+            data: isMultiLine ? finalResults : primaryData,
             metadata: {
                 originalFile: originalName,
                 fileType,
@@ -1127,7 +1175,9 @@ router.post('/process', upload.single('file'), async (req, res) => {
                 processingTimeMs: processingTime,
                 keyUsed: apiKey.name,
                 ruleApplied: ruleApplied || null,
-                warnings: finalData.warnings || [],
+                profileApplied: profileApplied || null,
+                linesProduced: finalResults.length,
+                warnings: primaryData.warnings || [],
                 rawOcrResponse: rawOcrResult
             }
         });
@@ -1159,6 +1209,16 @@ router.get('/company-rules', (req, res) => {
     res.json({
         rules: listCompanyRules(),
         total: listCompanyRules().length
+    });
+});
+
+// ══════════════════════════════════════════════
+// GET /api/ocr/company-profiles — แสดง Company Profiles ทั้งหมด
+// ══════════════════════════════════════════════
+router.get('/company-profiles', (req, res) => {
+    res.json({
+        profiles: listProfiles(),
+        total: listProfiles().length
     });
 });
 

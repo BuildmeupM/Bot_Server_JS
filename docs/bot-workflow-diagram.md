@@ -34,9 +34,13 @@ flowchart TD
     F["🏢 เข้าหน้าบริษัท emi=peakCode"] --> F1
 
     F1["🔑 ตรวจสอบสิทธิ์ผู้ใช้<br/>เข้า /setting/userSetting"] --> F2["อ่านตาราง ผู้ใช้งานในระบบ<br/>ค้นหาชื่อ Kanokwan somsri"]
-    F2 --> F3{"พบ Kanokwan somsri<br/>เป็นผู้ดูแลระบบ?"}
+    F2 --> F3{"พบ Kanokwan somsri<br/>ในหน้าแรก?"}
     F3 -- "✅ พบ" --> G["📝 เข้าหน้าบันทึกค่าใช้จ่าย"]
-    F3 -- "❌ ไม่พบ" --> F4["❌ หยุดการทำงาน<br/>แจ้งเตือน: ไม่พบสิทธิ์ผู้ดูแล"]
+    F3 -- "❌ ไม่พบ" --> F5["⬇️ เลื่อนลงด้านล่าง<br/>คลิก Dropdown จำนวนแสดง<br/>เปลี่ยนจาก 10 → 100"]
+    F5 --> F6["🔄 รอตารางโหลดใหม่<br/>อ่านชื่อผู้ใช้อีกครั้ง"]
+    F6 --> F7{"พบ Kanokwan somsri<br/>ในรายการ 100 คน?"}
+    F7 -- "✅ พบ" --> G
+    F7 -- "❌ ไม่พบ" --> F4["❌ หยุดการทำงาน<br/>แจ้งเตือน: ไม่พบสิทธิ์ผู้ดูแล"]
 
     G --> LOOP["🔁 เริ่มลูป — บิลที่ 1, 2, 3 ..."]
     LOOP --> H["🔄 รีเฟรชหน้าสร้างบิลใหม่"]
@@ -158,6 +162,8 @@ flowchart TD
     style LOOP fill:#6366f1,color:#fff,stroke:none
     style F1 fill:#d946ef,color:#fff,stroke:none
     style F4 fill:#ef4444,color:#fff,stroke:none
+    style F5 fill:#a855f7,color:#fff,stroke:none
+    style F6 fill:#d946ef,color:#fff,stroke:none
     style FILE_START fill:#0ea5e9,color:#fff,stroke:none
     style FILE_UPLOAD fill:#14b8a6,color:#fff,stroke:none
     style FILE_MOVE fill:#f59e0b,color:#000,stroke:none

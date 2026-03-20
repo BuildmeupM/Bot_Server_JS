@@ -305,7 +305,7 @@ export default function OcrBatchPanel() {
         }
     }
 
-    // ── Export Excel via backend API (scoped to this batch) ──
+    // ── Export Excel via backend API (scoped to source folder) ──
     const handleExportExcel = async () => {
         if (!jobDetail?.results?.length) return
         setExporting(true)
@@ -319,13 +319,16 @@ export default function OcrBatchPanel() {
                 toast.error('ไม่พบ Build Code จากไฟล์ — ไม่สามารถส่งออก Excel ได้')
                 return
             }
-            // ส่ง fileNames จาก batch results เพื่อ export เฉพาะไฟล์ของ batch นี้
-            const batchFileNames = jobDetail.results
-                .filter(r => r.status === 'done' && r.fileName)
-                .map(r => r.fileName)
+
+            // ย้อนกลับไปหา folder ต้นทางจาก filePath ของไฟล์ที่อ่าน
+            const folderPath = filePath.substring(0, Math.max(
+                filePath.lastIndexOf('\\'),
+                filePath.lastIndexOf('/')
+            ))
+
             const params = new URLSearchParams()
-            if (batchFileNames.length > 0) {
-                params.set('fileNames', encodeURIComponent(JSON.stringify(batchFileNames)))
+            if (folderPath) {
+                params.set('folderPath', folderPath)
             }
             const qs = params.toString() ? `?${params.toString()}` : ''
             const res = await fetch(`/api/ocr/export-excel/${encodeURIComponent(buildCode)}${qs}`)
@@ -689,6 +692,33 @@ export default function OcrBatchPanel() {
                                                                     <div style={{ fontSize: 16, fontWeight: 900, color: '#2563eb', fontFamily: "'JetBrains Mono',Consolas,monospace", letterSpacing: '-0.02em' }}>{d.total ? parseFloat(String(d.total).replace(/,/g, '')).toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—'}</div>
                                                                 </div>
                                                             </div>
+                                                            {/* Sub-lines from Company Profile (e.g. กรมศุลกากร 2 บรรทัด) */}
+                                                            {r.subLines && r.subLines.length > 1 && (
+                                                                <div style={{ paddingLeft: 28, marginTop: 6 }}>
+                                                                    {r.subLines.map((line, li) => (
+                                                                        <div key={li} style={{
+                                                                            display: 'flex', alignItems: 'center', gap: 10,
+                                                                            padding: '4px 10px', borderRadius: 8,
+                                                                            background: li === 0 ? 'rgba(59,130,246,0.06)' : 'rgba(249,115,22,0.06)',
+                                                                            border: `1px solid ${li === 0 ? 'rgba(59,130,246,0.15)' : 'rgba(249,115,22,0.15)'}`,
+                                                                            marginBottom: 3, fontSize: 11
+                                                                        }}>
+                                                                            <span style={{ fontWeight: 700, color: li === 0 ? '#2563eb' : '#ea580c', minWidth: 100 }}>
+                                                                                {line.lineDescription || `บรรทัดที่ ${li + 1}`}
+                                                                            </span>
+                                                                            <span style={{ color: '#64748b', fontFamily: "'JetBrains Mono',Consolas,monospace", fontWeight: 600, minWidth: 80, textAlign: 'right' }}>
+                                                                                {line.subtotal ? parseFloat(String(line.subtotal).replace(/,/g, '')).toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—'}
+                                                                            </span>
+                                                                            <span style={{ color: '#94a3b8', fontFamily: "'JetBrains Mono',Consolas,monospace", minWidth: 70, textAlign: 'right' }}>
+                                                                                VAT {line.vat ? parseFloat(String(line.vat).replace(/,/g, '')).toLocaleString('en-US', { minimumFractionDigits: 2 }) : '0.00'}
+                                                                            </span>
+                                                                            <span style={{ fontWeight: 800, color: li === 0 ? '#2563eb' : '#ea580c', fontFamily: "'JetBrains Mono',Consolas,monospace", minWidth: 90, textAlign: 'right' }}>
+                                                                                {line.total ? parseFloat(String(line.total).replace(/,/g, '')).toLocaleString('en-US', { minimumFractionDigits: 2 }) : '—'}
+                                                                            </span>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            )}
                                                         </div>
 
                                                         {/* ── Expanded Bento Detail ── */}
@@ -1290,37 +1320,82 @@ export default function OcrBatchPanel() {
                         )}
                     </div>
 
-                    {/* ── Section 2: คิวงานบอท ── */}
+                    {/* ── Section 2: Bot Command Center (Light Theme) ── */}
                     <div style={{
-                        background: '#fff', borderRadius: 16, padding: '24px 28px',
-                        border: '1px solid #e5e7eb',
-                        boxShadow: '0 1px 4px rgba(0,0,0,0.04)'
+                        background: '#fff', borderRadius: 20, padding: '28px 28px 24px',
+                        border: '1px solid #e2e8f0',
+                        boxShadow: '0 4px 20px rgba(0,0,0,0.04)',
+                        position: 'relative', overflow: 'hidden'
                     }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+                        {/* Subtle background accents */}
+                        <div style={{
+                            position: 'absolute', top: -40, right: -40, width: 200, height: 200,
+                            background: 'radial-gradient(circle, rgba(59,130,246,0.06) 0%, transparent 70%)',
+                            pointerEvents: 'none'
+                        }} />
+                        <div style={{
+                            position: 'absolute', bottom: -30, left: -30, width: 160, height: 160,
+                            background: 'radial-gradient(circle, rgba(16,185,129,0.05) 0%, transparent 70%)',
+                            pointerEvents: 'none'
+                        }} />
+
+                        {/* Header */}
+                        <div style={{
+                            display: 'flex', alignItems: 'center', gap: 14, marginBottom: 20,
+                            position: 'relative', zIndex: 1
+                        }}>
                             <div style={{
-                                width: 40, height: 40, borderRadius: 12,
-                                background: 'linear-gradient(135deg, #f0fdf4, #dcfce7)',
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20
-                            }}>📋</div>
+                                width: 44, height: 44, borderRadius: 14,
+                                background: 'linear-gradient(135deg, #eff6ff, #dbeafe)',
+                                border: '1px solid #bfdbfe',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: 22
+                            }}>🤖</div>
                             <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 16, fontWeight: 800, color: '#1e3a5f' }}>คิวงานบอท</div>
-                                <div style={{ fontSize: 12, color: '#64748b', marginTop: 1 }}>คิวงานที่ระบบสั่งบอททำงานทั้งหมด</div>
+                                <div style={{
+                                    fontSize: 17, fontWeight: 800, color: '#1e3a5f',
+                                    letterSpacing: '0.02em'
+                                }}>Bot Command Center</div>
+                                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>
+                                    สถานะระบบ • {new Date().toLocaleDateString('th-TH', { day: '2-digit', month: 'short', year: 'numeric' })}
+                                </div>
                             </div>
-                            {/* Queue Status Badge */}
-                            <div style={{
-                                display: 'flex', gap: 8, alignItems: 'center'
-                            }}>
+
+                            {/* Capacity Meter */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                                    <span style={{
+                                        fontSize: 10, fontWeight: 700, color: '#94a3b8',
+                                        fontFamily: "'JetBrains Mono',monospace", letterSpacing: '0.05em'
+                                    }}>ACTIVE BOTS</span>
+                                    <div style={{ display: 'flex', gap: 3 }}>
+                                        {Array.from({ length: botQueueInfo.maxConcurrent }, (_, i) => (
+                                            <div key={i} style={{
+                                                width: 8, height: 22, borderRadius: 3,
+                                                background: i < botQueueInfo.runningCount
+                                                    ? 'linear-gradient(180deg, #3b82f6, #2563eb)'
+                                                    : '#f1f5f9',
+                                                border: `1px solid ${i < botQueueInfo.runningCount ? '#93c5fd' : '#e2e8f0'}`,
+                                                boxShadow: i < botQueueInfo.runningCount ? '0 2px 6px rgba(59,130,246,0.25)' : 'none',
+                                                transition: 'all 0.4s ease'
+                                            }} />
+                                        ))}
+                                    </div>
+                                </div>
                                 <span style={{
-                                    padding: '4px 12px', borderRadius: 8, fontSize: 11, fontWeight: 700,
-                                    background: '#eff6ff', border: '1px solid #bfdbfe', color: '#2563eb',
+                                    padding: '6px 14px', borderRadius: 10, fontSize: 14, fontWeight: 800,
+                                    background: botQueueInfo.runningCount > 0 ? '#eff6ff' : '#f8fafc',
+                                    border: `1px solid ${botQueueInfo.runningCount > 0 ? '#bfdbfe' : '#e2e8f0'}`,
+                                    color: botQueueInfo.runningCount > 0 ? '#2563eb' : '#94a3b8',
                                     fontFamily: "'JetBrains Mono',monospace"
                                 }}>
-                                    🤖 {botQueueInfo.runningCount}/{botQueueInfo.maxConcurrent}
+                                    {botQueueInfo.runningCount}/{botQueueInfo.maxConcurrent}
                                 </span>
                                 {botQueueInfo.queuedCount > 0 && (
                                     <span style={{
-                                        padding: '4px 12px', borderRadius: 8, fontSize: 11, fontWeight: 700,
-                                        background: '#fef3c7', border: '1px solid #fde68a', color: '#92400e'
+                                        padding: '6px 14px', borderRadius: 10, fontSize: 11, fontWeight: 700,
+                                        background: '#fffbeb', border: '1px solid #fde68a',
+                                        color: '#b45309'
                                     }}>
                                         ⏳ รอคิว {botQueueInfo.queuedCount}
                                     </span>
@@ -1328,119 +1403,406 @@ export default function OcrBatchPanel() {
                             </div>
                         </div>
 
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {/* Job List */}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, position: 'relative', zIndex: 1 }}>
                             {botJobsList.length === 0 && (
                                 <div style={{
-                                    textAlign: 'center', padding: '48px 20px',
-                                    background: '#f8fafc', borderRadius: 14,
+                                    textAlign: 'center', padding: '52px 20px',
+                                    background: '#f8fafc', borderRadius: 16,
                                     border: '1px dashed #e2e8f0'
                                 }}>
-                                    <div style={{ fontSize: 40, marginBottom: 10 }}>📭</div>
-                                    <div style={{ fontSize: 15, fontWeight: 700, color: '#64748b', marginBottom: 4 }}>
+                                    <div style={{ fontSize: 42, marginBottom: 12, opacity: 0.5 }}>🤖</div>
+                                    <div style={{
+                                        fontSize: 14, fontWeight: 700, color: '#94a3b8', marginBottom: 4
+                                    }}>
                                         ยังไม่มีคิวงาน
                                     </div>
-                                    <div style={{ fontSize: 12, color: '#94a3b8' }}>
+                                    <div style={{ fontSize: 11, color: '#cbd5e1' }}>
                                         เมื่อสั่งบอททำงานแล้วจะแสดงที่นี่
                                     </div>
                                 </div>
                             )}
 
-                            {botJobsList.map(job => {
+                            {botJobsList.map((job, jobIdx) => {
                                 const statusConfig = {
-                                    queued: { label: '⏳ รอคิว', bg: '#fef3c7', border: '#fde68a', color: '#92400e' },
-                                    running: { label: '🔄 กำลังทำงาน', bg: '#dbeafe', border: '#93c5fd', color: '#1e40af' },
-                                    logged_in: { label: '✅ Login สำเร็จ', bg: '#dcfce7', border: '#86efac', color: '#166534' },
-                                    working: { label: '⚙️ กรอกข้อมูล', bg: '#dbeafe', border: '#93c5fd', color: '#1e40af' },
-                                    done: { label: '✅ เสร็จสิ้น', bg: '#f0fdf4', border: '#bbf7d0', color: '#16a34a' },
-                                    error: { label: '❌ ผิดพลาด', bg: '#fef2f2', border: '#fecaca', color: '#dc2626' },
-                                    stopped: { label: '⏹️ หยุดแล้ว', bg: '#f1f5f9', border: '#e2e8f0', color: '#64748b' },
+                                    queued:    { label: '⏳ รอคิว',       accent: '#d97706', bg: '#fffbeb', border: '#fde68a', light: '#fef3c7' },
+                                    running:   { label: '⚡ กำลังทำงาน', accent: '#2563eb', bg: '#eff6ff', border: '#bfdbfe', light: '#dbeafe' },
+                                    logged_in: { label: '🔐 Login แล้ว', accent: '#059669', bg: '#ecfdf5', border: '#a7f3d0', light: '#d1fae5' },
+                                    working:   { label: '⚙️ กรอกข้อมูล', accent: '#2563eb', bg: '#eff6ff', border: '#bfdbfe', light: '#dbeafe' },
+                                    done:      { label: '✅ เสร็จสิ้น',   accent: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0', light: '#dcfce7' },
+                                    error:     { label: '❌ ผิดพลาด',    accent: '#dc2626', bg: '#fef2f2', border: '#fecaca', light: '#fee2e2' },
+                                    stopped:   { label: '⏹️ หยุดแล้ว',   accent: '#64748b', bg: '#f8fafc', border: '#e2e8f0', light: '#f1f5f9' },
                                 }
                                 const s = statusConfig[job.status] || statusConfig.queued
                                 const isActive = ['running', 'logged_in', 'working'].includes(job.status)
                                 const isLogOpen = botActiveLogId === job.id
+                                const botNumber = jobIdx + 1
+
+                                // Count errors/warnings from logs (when logs are loaded for this job)
+                                const jobLogs = isLogOpen ? botActiveLogs : []
+                                const errorLogs = jobLogs.filter(l => l.level === 'error')
+                                const warnLogs = jobLogs.filter(l => l.level === 'warn')
 
                                 return (
                                     <div key={job.id} style={{
                                         borderRadius: 14, overflow: 'hidden',
-                                        border: `1px solid ${isActive ? '#93c5fd' : '#e2e8f0'}`,
-                                        background: isActive ? 'linear-gradient(135deg, #fafbff, #f0f4ff)' : '#fafafa'
+                                        border: `1.5px solid ${isActive ? s.border : '#e2e8f0'}`,
+                                        background: isActive
+                                            ? `linear-gradient(135deg, ${s.bg}, #fff)`
+                                            : '#fafbfc',
+                                        boxShadow: isActive ? `0 4px 16px ${s.accent}15` : '0 1px 3px rgba(0,0,0,0.04)',
+                                        transition: 'all 0.3s ease'
                                     }}>
                                         {/* Job Header */}
                                         <div style={{
                                             padding: '14px 18px',
-                                            display: 'flex', alignItems: 'center', gap: 10
+                                            display: 'flex', alignItems: 'center', gap: 12
                                         }}>
-                                            {/* Job ID */}
-                                            <span style={{
-                                                padding: '3px 10px', borderRadius: 8,
-                                                background: '#eff6ff', border: '1px solid #bfdbfe',
-                                                color: '#2563eb', fontSize: 11, fontWeight: 800,
-                                                fontFamily: "'JetBrains Mono',monospace"
-                                            }}>{job.id}</span>
-                                            {/* Profile name */}
-                                            <span style={{ fontSize: 13, fontWeight: 700, color: '#1e293b', flex: 1 }}>
-                                                {job.profileName}
-                                            </span>
-                                            {/* Status badge */}
-                                            <span style={{
-                                                padding: '4px 12px', borderRadius: 8,
-                                                fontSize: 11, fontWeight: 700,
-                                                background: s.bg, border: `1px solid ${s.border}`, color: s.color
-                                            }}>{s.label}</span>
-                                            {/* Log count */}
-                                            <span style={{ fontSize: 11, color: '#94a3b8', fontFamily: "'JetBrains Mono',monospace" }}>
-                                                {job.logCount} logs
-                                            </span>
-                                            {/* Actions */}
-                                            <button onClick={() => setBotActiveLogId(isLogOpen ? null : job.id)} style={{
-                                                padding: '5px 14px', borderRadius: 8, border: '1px solid #bfdbfe',
-                                                background: isLogOpen ? '#3b82f6' : '#eff6ff',
-                                                color: isLogOpen ? '#fff' : '#2563eb',
-                                                fontSize: 11, fontWeight: 700, cursor: 'pointer',
-                                                transition: 'all 0.2s'
+                                            {/* Bot Avatar */}
+                                            <div style={{
+                                                position: 'relative',
+                                                width: 42, height: 42, borderRadius: 12,
+                                                background: `linear-gradient(135deg, ${s.bg}, ${s.light})`,
+                                                border: `1.5px solid ${s.border}`,
+                                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                fontSize: 18, flexShrink: 0
                                             }}>
-                                                {isLogOpen ? '✕ ปิด' : '📋 ดู Log'}
-                                            </button>
-                                            {isActive && (
-                                                <button onClick={() => handleStopJob(job.id)} style={{
-                                                    padding: '5px 14px', borderRadius: 8, border: '1px solid #fecaca',
-                                                    background: '#fef2f2', color: '#dc2626',
-                                                    fontSize: 11, fontWeight: 700, cursor: 'pointer'
+                                                {isActive && (
+                                                    <div style={{
+                                                        position: 'absolute', inset: -4,
+                                                        borderRadius: 15,
+                                                        border: `2px solid ${s.accent}`,
+                                                        opacity: 0.3,
+                                                        animation: 'botPulse 2s ease-in-out infinite'
+                                                    }} />
+                                                )}
+                                                🤖
+                                            </div>
+
+                                            {/* Bot Info */}
+                                            <div style={{ flex: 1, minWidth: 0 }}>
+                                                <div style={{
+                                                    fontSize: 14, fontWeight: 800, color: '#1e293b',
+                                                    display: 'flex', alignItems: 'center', gap: 8
                                                 }}>
-                                                    ⏹️ หยุด
+                                                    <span style={{
+                                                        color: s.accent, fontWeight: 900,
+                                                        fontFamily: "'JetBrains Mono',monospace"
+                                                    }}>BOT {botNumber}</span>
+                                                    <span style={{ color: '#cbd5e1' }}>›</span>
+                                                    <span style={{
+                                                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                                        color: '#334155'
+                                                    }}>{job.profileName}</span>
+                                                </div>
+                                                <div style={{
+                                                    fontSize: 11, color: '#94a3b8', marginTop: 2,
+                                                    fontFamily: "'JetBrains Mono',monospace",
+                                                    display: 'flex', gap: 8, alignItems: 'center'
+                                                }}>
+                                                    <span>ID: {job.id}</span>
+                                                    <span style={{ color: '#e2e8f0' }}>•</span>
+                                                    <span>📋 {job.logCount} logs</span>
+                                                </div>
+                                            </div>
+
+                                            {/* Status Badge */}
+                                            <div style={{
+                                                padding: '5px 14px', borderRadius: 20,
+                                                background: s.bg,
+                                                border: `1px solid ${s.border}`,
+                                                display: 'flex', alignItems: 'center', gap: 6
+                                            }}>
+                                                {isActive && (
+                                                    <span style={{
+                                                        width: 7, height: 7, borderRadius: '50%',
+                                                        background: s.accent,
+                                                        boxShadow: `0 0 6px ${s.accent}60`,
+                                                        animation: 'botBlink 1.5s ease-in-out infinite',
+                                                        display: 'inline-block'
+                                                    }} />
+                                                )}
+                                                <span style={{
+                                                    fontSize: 11, fontWeight: 700, color: s.accent
+                                                }}>{s.label}</span>
+                                            </div>
+
+                                            {/* Actions */}
+                                            <div style={{ display: 'flex', gap: 6 }}>
+                                                <button onClick={() => setBotActiveLogId(isLogOpen ? null : job.id)} style={{
+                                                    padding: '6px 16px', borderRadius: 8,
+                                                    border: `1px solid ${isLogOpen ? '#93c5fd' : '#e2e8f0'}`,
+                                                    background: isLogOpen ? '#3b82f6' : '#f8fafc',
+                                                    color: isLogOpen ? '#fff' : '#64748b',
+                                                    fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                                                    transition: 'all 0.2s'
+                                                }}>
+                                                    {isLogOpen ? '✕ ปิด' : '📋 ดู Log'}
                                                 </button>
-                                            )}
+                                                {isActive && (
+                                                    <button onClick={() => handleStopJob(job.id)} style={{
+                                                        padding: '6px 16px', borderRadius: 8,
+                                                        border: '1px solid #fecaca',
+                                                        background: '#fef2f2', color: '#dc2626',
+                                                        fontSize: 11, fontWeight: 700, cursor: 'pointer'
+                                                    }}>
+                                                        ⏹️ หยุด
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
 
-                                        {/* Log Viewer (Terminal Style) */}
-                                        {isLogOpen && (
-                                            <div style={{
-                                                padding: '0 18px 14px',
-                                            }}>
+                                        {/* Error Report — shows when log is open and has errors */}
+                                        {isLogOpen && (errorLogs.length > 0 || warnLogs.length > 0) && (() => {
+                                            // Translate technical messages to user-friendly Thai
+                                            const translateMsg = (msg) => {
+                                                const m = (msg || '').replace(/^[❌⚠️✅🔐📋🔑⚙️📝▶️✕■⏹️🤖⏳🐛]+\s*/g, '').trim()
+                                                const patterns = [
+                                                    [/page\.goto.*Target page.*closed/i, 'หน้าเว็บถูกปิดไปก่อนที่บอทจะเปิดหน้าใหม่'],
+                                                    [/page\.waitForTimeout.*closed/i, 'หน้าเว็บถูกปิดขณะบอทกำลังรอการโหลด'],
+                                                    [/page\.waitForSelector.*closed/i, 'หน้าเว็บถูกปิดขณะบอทกำลังรอหาปุ่มหรือช่องกรอกข้อมูล'],
+                                                    [/page\.click.*closed/i, 'หน้าเว็บถูกปิดขณะบอทกำลังกดปุ่ม'],
+                                                    [/Target page.*context.*closed/i, 'เบราว์เซอร์ถูกปิดกลางคัน ทำให้บอททำงานต่อไม่ได้'],
+                                                    [/browser has been closed/i, 'เบราว์เซอร์ถูกปิดไปแล้ว บอทไม่สามารถทำงานต่อได้'],
+                                                    [/context.*closed/i, 'เบราว์เซอร์ถูกปิดกลางคัน'],
+                                                    [/timeout.*exceeded/i, 'หน้าเว็บโหลดนานเกินไป (Timeout)'],
+                                                    [/TimeoutError/i, 'หน้าเว็บโหลดนานเกินไป (Timeout)'],
+                                                    [/net::ERR_/i, 'ไม่สามารถเชื่อมต่ออินเทอร์เน็ตได้ หรือเว็บปลายทาง offline'],
+                                                    [/Navigation failed/i, 'เปิดหน้าเว็บไม่สำเร็จ อาจเกิดจากอินเทอร์เน็ตหรือเว็บล่ม'],
+                                                    [/ไม่พบ.*ในรายชื่อ/i, null],
+                                                    [/ตรวจสอบสิทธิ์ไม่สำเร็จ/i, null],
+                                                    [/Page ถูกปิดจากภายนอก/i, 'หน้าเว็บถูกปิดจากภายนอก (อาจมีคนปิดเบราว์เซอร์)'],
+                                                    [/Page ถูกปิดไปแล้ว/i, 'หน้าเว็บถูกปิดไปแล้ว'],
+                                                    [/เกิดข้อผิดพลาด/i, null],
+                                                    [/selector.*is not visible/i, 'บอทหาปุ่มหรือช่องกรอกข้อมูลไม่เจอ อาจเป็นเพราะหน้าเว็บเปลี่ยน'],
+                                                    [/Cannot read prop/i, 'เกิดข้อผิดพลาดในระบบ (ข้อมูลบางอย่างหายไป)'],
+                                                    [/ECONNREFUSED/i, 'เชื่อมต่อกับเซิร์ฟเวอร์ไม่ได้'],
+                                                    [/ENOTFOUND/i, 'หาเซิร์ฟเวอร์ปลายทางไม่เจอ ตรวจสอบอินเทอร์เน็ต'],
+                                                ]
+                                                for (const [pattern, translation] of patterns) {
+                                                    if (pattern.test(m)) {
+                                                        return translation || m
+                                                    }
+                                                }
+                                                // If message is already Thai, return as-is
+                                                if (/[\u0E00-\u0E7F]/.test(m)) return m
+                                                // Fallback: show original
+                                                return m
+                                            }
+
+                                            // Generate summary sentence
+                                            const summaryParts = []
+                                            if (errorLogs.length > 0) summaryParts.push(`เกิดข้อผิดพลาด ${errorLogs.length} รายการ`)
+                                            if (warnLogs.length > 0) summaryParts.push(`คำเตือน ${warnLogs.length} รายการ`)
+
+                                            return (
+                                            <div style={{ padding: '0 18px 12px' }}>
                                                 <div style={{
-                                                    background: '#0f172a', borderRadius: 10,
-                                                    padding: '14px 16px', maxHeight: 300, overflowY: 'auto',
-                                                    fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-                                                    fontSize: 12, lineHeight: 1.8
+                                                    background: errorLogs.length > 0
+                                                        ? 'linear-gradient(135deg, #fef2f2, #fff5f5)'
+                                                        : 'linear-gradient(135deg, #fffbeb, #fefce8)',
+                                                    borderRadius: 12, padding: '16px 18px',
+                                                    border: `1px solid ${errorLogs.length > 0 ? '#fecaca' : '#fde68a'}`
                                                 }}>
-                                                    {botActiveLogs.length === 0 ? (
-                                                        <div style={{ color: '#475569' }}>กำลังโหลด...</div>
-                                                    ) : (
-                                                        botActiveLogs.map((log, i) => {
-                                                            const colors = {
-                                                                info: '#94a3b8',
-                                                                success: '#4ade80',
-                                                                warn: '#fbbf24',
-                                                                error: '#f87171'
-                                                            }
+                                                    {/* Header */}
+                                                    <div style={{
+                                                        display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6
+                                                    }}>
+                                                        <span style={{ fontSize: 18 }}>
+                                                            {errorLogs.length > 0 ? '📋' : '⚠️'}
+                                                        </span>
+                                                        <span style={{
+                                                            fontSize: 14, fontWeight: 800,
+                                                            color: errorLogs.length > 0 ? '#b91c1c' : '#92400e'
+                                                        }}>
+                                                            รายงานสรุปปัญหา
+                                                        </span>
+                                                        <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+                                                            {errorLogs.length > 0 && (
+                                                                <span style={{
+                                                                    padding: '3px 10px', borderRadius: 6,
+                                                                    background: '#fee2e2', border: '1px solid #fecaca',
+                                                                    fontSize: 11, fontWeight: 700, color: '#dc2626'
+                                                                }}>
+                                                                    ❌ {errorLogs.length} ข้อผิดพลาด
+                                                                </span>
+                                                            )}
+                                                            {warnLogs.length > 0 && (
+                                                                <span style={{
+                                                                    padding: '3px 10px', borderRadius: 6,
+                                                                    background: '#fef3c7', border: '1px solid #fde68a',
+                                                                    fontSize: 11, fontWeight: 700, color: '#b45309'
+                                                                }}>
+                                                                    ⚠️ {warnLogs.length} คำเตือน
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Summary sentence */}
+                                                    <div style={{
+                                                        fontSize: 12.5, color: '#64748b', marginBottom: 12,
+                                                        paddingLeft: 28, lineHeight: 1.6
+                                                    }}>
+                                                        การทำงานชุดนี้{summaryParts.join(' และ ')}
+                                                        {errorLogs.length > 0
+                                                            ? ' — บอทอาจทำงานไม่สำเร็จบางรายการ กรุณาตรวจสอบรายละเอียดด้านล่าง'
+                                                            : ' — บอทยังคงทำงานต่อได้แต่มีจุดที่ต้องระวัง'}
+                                                    </div>
+
+                                                    {/* Error cards */}
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                        {errorLogs.map((log, i) => {
+                                                            const friendly = translateMsg(log.message)
+                                                            const isSameAsOriginal = friendly === (log.message || '').replace(/^[❌⚠️✅🔐📋🔑⚙️📝▶️✕■⏹️🤖⏳🐛]+\s*/g, '').trim()
+                                                            const hasOriginalDetail = !isSameAsOriginal && log.message
+
                                                             return (
-                                                                <div key={i} style={{ color: colors[log.level] || '#94a3b8' }}>
-                                                                    <span style={{ color: '#475569' }}>[{log.time}]</span>{' '}
-                                                                    {log.message}
+                                                                <div key={`err-${i}`} style={{
+                                                                    padding: '10px 14px', borderRadius: 10,
+                                                                    background: '#fff', border: '1px solid #fecaca',
+                                                                }}>
+                                                                    <div style={{
+                                                                        display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: hasOriginalDetail ? 6 : 0
+                                                                    }}>
+                                                                        <span style={{
+                                                                            fontSize: 10, color: '#fff', fontWeight: 700,
+                                                                            background: '#ef4444', padding: '2px 8px', borderRadius: 4,
+                                                                            flexShrink: 0, marginTop: 2
+                                                                        }}>ผิดพลาด</span>
+                                                                        <div style={{ fontSize: 13, color: '#991b1b', fontWeight: 600, lineHeight: 1.5 }}>
+                                                                            {friendly}
+                                                                        </div>
+                                                                        <span style={{
+                                                                            fontSize: 10, color: '#94a3b8', flexShrink: 0,
+                                                                            fontFamily: "'JetBrains Mono',monospace"
+                                                                        }}>{log.time}</span>
+                                                                    </div>
+                                                                    {hasOriginalDetail && (
+                                                                        <div style={{
+                                                                            fontSize: 10, color: '#94a3b8', paddingLeft: 50,
+                                                                            fontFamily: "'JetBrains Mono',monospace",
+                                                                            borderTop: '1px solid #fee2e2', paddingTop: 6,
+                                                                            wordBreak: 'break-all'
+                                                                        }}>
+                                                                            💬 รายละเอียด: {log.message}
+                                                                        </div>
+                                                                    )}
                                                                 </div>
                                                             )
-                                                        })
-                                                    )}
+                                                        })}
+                                                        {warnLogs.map((log, i) => {
+                                                            const friendly = translateMsg(log.message)
+                                                            const isSameAsOriginal = friendly === (log.message || '').replace(/^[❌⚠️✅🔐📋🔑⚙️📝▶️✕■⏹️🤖⏳🐛]+\s*/g, '').trim()
+                                                            const hasOriginalDetail = !isSameAsOriginal && log.message
+
+                                                            return (
+                                                                <div key={`warn-${i}`} style={{
+                                                                    padding: '10px 14px', borderRadius: 10,
+                                                                    background: '#fff', border: '1px solid #fde68a',
+                                                                }}>
+                                                                    <div style={{
+                                                                        display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: hasOriginalDetail ? 6 : 0
+                                                                    }}>
+                                                                        <span style={{
+                                                                            fontSize: 10, color: '#fff', fontWeight: 700,
+                                                                            background: '#f59e0b', padding: '2px 8px', borderRadius: 4,
+                                                                            flexShrink: 0, marginTop: 2
+                                                                        }}>คำเตือน</span>
+                                                                        <div style={{ fontSize: 13, color: '#92400e', fontWeight: 600, lineHeight: 1.5 }}>
+                                                                            {friendly}
+                                                                        </div>
+                                                                        <span style={{
+                                                                            fontSize: 10, color: '#94a3b8', flexShrink: 0,
+                                                                            fontFamily: "'JetBrains Mono',monospace"
+                                                                        }}>{log.time}</span>
+                                                                    </div>
+                                                                    {hasOriginalDetail && (
+                                                                        <div style={{
+                                                                            fontSize: 10, color: '#94a3b8', paddingLeft: 50,
+                                                                            fontFamily: "'JetBrains Mono',monospace",
+                                                                            borderTop: '1px solid #fef3c7', paddingTop: 6,
+                                                                            wordBreak: 'break-all'
+                                                                        }}>
+                                                                            💬 รายละเอียด: {log.message}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            )
+                                        })()}
+
+                                        {/* Log Viewer — Terminal */}
+                                        {isLogOpen && (
+                                            <div style={{ padding: '0 18px 14px' }}>
+                                                <div style={{
+                                                    background: '#0f172a', borderRadius: 12, overflow: 'hidden',
+                                                    border: '1px solid #1e293b'
+                                                }}>
+                                                    {/* Terminal Title Bar */}
+                                                    <div style={{
+                                                        padding: '7px 14px',
+                                                        background: '#1e293b',
+                                                        borderBottom: '1px solid #334155',
+                                                        display: 'flex', alignItems: 'center', gap: 8
+                                                    }}>
+                                                        <div style={{ display: 'flex', gap: 5 }}>
+                                                            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#ef4444' }} />
+                                                            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#fbbf24' }} />
+                                                            <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#22c55e' }} />
+                                                        </div>
+                                                        <span style={{
+                                                            fontSize: 10, color: '#64748b',
+                                                            fontFamily: "'JetBrains Mono',monospace"
+                                                        }}>
+                                                            bot_{job.id} — {botActiveLogs.length} entries
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Terminal Content */}
+                                                    <div style={{
+                                                        padding: '12px 16px', maxHeight: 320, overflowY: 'auto',
+                                                        fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
+                                                        fontSize: 12, lineHeight: 1.8
+                                                    }}>
+                                                        {botActiveLogs.length === 0 ? (
+                                                            <div style={{ color: '#475569' }}>
+                                                                <span style={{ color: '#3b82f6' }}>$</span> กำลังโหลด...
+                                                                <span style={{
+                                                                    display: 'inline-block', width: 7, height: 14,
+                                                                    background: '#3b82f6', marginLeft: 2,
+                                                                    animation: 'botBlink 1s step-end infinite',
+                                                                    verticalAlign: 'text-bottom'
+                                                                }} />
+                                                            </div>
+                                                        ) : (
+                                                            botActiveLogs.map((log, i) => {
+                                                                const colors = {
+                                                                    info: '#94a3b8',
+                                                                    success: '#4ade80',
+                                                                    warn: '#fbbf24',
+                                                                    error: '#f87171'
+                                                                }
+                                                                return (
+                                                                    <div key={i} style={{
+                                                                        color: colors[log.level] || '#94a3b8',
+                                                                        borderLeft: log.level === 'error' ? '2px solid #ef4444'
+                                                                            : log.level === 'warn' ? '2px solid #f59e0b'
+                                                                            : log.level === 'success' ? '2px solid #10b981'
+                                                                            : '2px solid transparent',
+                                                                        paddingLeft: 10, marginBottom: 1
+                                                                    }}>
+                                                                        <span style={{ color: '#475569', fontSize: 10 }}>[{log.time}]</span>{' '}
+                                                                        {log.message}
+                                                                    </div>
+                                                                )
+                                                            })
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
                                         )}
@@ -1449,6 +1811,18 @@ export default function OcrBatchPanel() {
                             })}
                         </div>
                     </div>
+
+                    {/* CSS Animations */}
+                    <style>{`
+                        @keyframes botPulse {
+                            0%, 100% { transform: scale(1); opacity: 0.3; }
+                            50% { transform: scale(1.12); opacity: 0; }
+                        }
+                        @keyframes botBlink {
+                            0%, 100% { opacity: 1; }
+                            50% { opacity: 0.2; }
+                        }
+                    `}</style>
                 </div>
             )}
 

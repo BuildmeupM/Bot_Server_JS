@@ -101,6 +101,7 @@ export const getBatchJobs = () => api.get('/ocr/batch-jobs');
 // Bot Database
 export const getBotProfiles = () => api.get('/bot-database/profiles');
 export const createBotProfile = (data) => api.post('/bot-database/profiles', data);
+export const updateBotProfile = (id, data) => api.put(`/bot-database/profiles/${id}`, data);
 export const deleteBotProfile = (id) => api.delete(`/bot-database/profiles/${id}`);
 export const getBotCredentials = () => api.get('/bot-database/credentials');
 export const createBotCredential = (data) => api.post('/bot-database/credentials', data);

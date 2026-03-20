@@ -62,8 +62,8 @@ router.post('/credentials', async (req, res) => {
         }
 
         const pool = getPool();
-        const [countRows] = await pool.execute('SELECT COUNT(*) as count FROM bot_credentials');
-        const nextIdNum = countRows[0].count + 1;
+        const [maxRows] = await pool.execute("SELECT MAX(CAST(SUBSTRING(id, 6) AS UNSIGNED)) as maxNum FROM bot_credentials");
+        const nextIdNum = (maxRows[0].maxNum || 0) + 1;
         const newId = `CRED-${String(nextIdNum).padStart(3, '0')}`;
         
         const encryptedPassword = encrypt(password);
@@ -106,17 +106,25 @@ router.get('/profiles', async (req, res) => {
         const pool = getPool();
         const [profiles] = await pool.execute('SELECT * FROM bot_profiles ORDER BY created_at DESC');
         
-        const decryptedProfiles = [];
+        const result = [];
         for (const profile of profiles) {
             const [configs] = await pool.execute('SELECT * FROM bot_pdf_configs WHERE profile_id = ?', [profile.id]);
-            decryptedProfiles.push({
+            result.push({
                 ...profile,
                 password: decrypt(profile.password),
-                pdfConfigs: configs
+                peakCode: profile.peak_code || '',
+                vatStatus: profile.vat_status || 'registered',
+                lastSync: profile.last_sync || '',
+                pdfConfigs: configs.map(c => ({
+                    companyName: c.company_name || '',
+                    customerCode: c.customer_code || '',
+                    accountCode: c.account_code || '',
+                    paymentCode: c.payment_code || ''
+                }))
             });
         }
         
-        res.json(decryptedProfiles);
+        res.json(result);
     } catch (error) {
         console.error("Error fetching profiles:", error);
         res.status(500).json({ error: 'Failed to fetch profiles' });
@@ -137,8 +145,8 @@ router.post('/profiles', async (req, res) => {
         try {
             await conn.beginTransaction();
 
-            const [countRows] = await conn.execute('SELECT COUNT(*) as count FROM bot_profiles');
-            const nextIdNum = countRows[0].count + 1;
+            const [maxRows] = await conn.execute("SELECT MAX(CAST(SUBSTRING(id, 5) AS UNSIGNED)) as maxNum FROM bot_profiles");
+            const nextIdNum = (maxRows[0].maxNum || 0) + 1;
             const newId = `BOT-${String(nextIdNum).padStart(3, '0')}`;
             
             const encryptedPassword = encrypt(password);
@@ -190,6 +198,49 @@ router.post('/profiles', async (req, res) => {
     } catch (error) {
         console.error("Error creating profile:", error);
         res.status(500).json({ error: 'Failed to create profile' });
+    }
+});
+
+// UPDATE PROFILE
+router.put('/profiles/:id', async (req, res) => {
+    try {
+        const { platform, username, password, software, peakCode, vatStatus, pdfConfigs } = req.body;
+        const pool = getPool();
+        const conn = await pool.getConnection();
+
+        try {
+            await conn.beginTransaction();
+
+            const encryptedPassword = encrypt(password);
+            await conn.execute(
+                `UPDATE bot_profiles SET platform=?, username=?, password=?, software=?, peak_code=?, vat_status=? WHERE id=?`,
+                [platform, username, encryptedPassword, software, peakCode || '', vatStatus || 'registered', req.params.id]
+            );
+
+            // Replace PDF configs
+            await conn.execute('DELETE FROM bot_pdf_configs WHERE profile_id = ?', [req.params.id]);
+            if (pdfConfigs && Array.isArray(pdfConfigs)) {
+                for (const config of pdfConfigs) {
+                    if (config.companyName || config.customerCode || config.accountCode || config.paymentCode) {
+                        await conn.execute(
+                            'INSERT INTO bot_pdf_configs (profile_id, company_name, customer_code, account_code, payment_code) VALUES (?, ?, ?, ?, ?)',
+                            [req.params.id, config.companyName || '', config.customerCode || '', config.accountCode || '', config.paymentCode || '']
+                        );
+                    }
+                }
+            }
+
+            await conn.commit();
+            res.json({ success: true });
+        } catch (txError) {
+            await conn.rollback();
+            throw txError;
+        } finally {
+            conn.release();
+        }
+    } catch (error) {
+        console.error("Error updating profile:", error);
+        res.status(500).json({ error: 'Failed to update profile' });
     }
 });
 

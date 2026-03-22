@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(powershell -Command \":*)",
+      "WebFetch(domain:www.rd.go.th)"
+    ]
+  }
+}

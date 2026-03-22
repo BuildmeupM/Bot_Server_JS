@@ -55,9 +55,19 @@
   align-items: start;
 }
 
+/* ── Sticky preview panel ── */
+.preview-card {
+  position: sticky;
+  top: 24px;
+}
+
 @media (max-width: 1024px) {
   .tax-content {
     grid-template-columns: 1fr;
+  }
+
+  .preview-card {
+    position: static;
   }
 }
 
@@ -194,7 +204,8 @@
 /* Preview Area */
 .preview-container {
   width: 100%;
-  height: 600px;
+  height: calc(100vh - 200px);
+  min-height: 600px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
   overflow: hidden;
